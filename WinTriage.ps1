@@ -141,7 +141,7 @@ function New-WTReportObject {
 
     $startedAt = Get-Date
 
-    $report = [ordered]@{
+        $report = [ordered]@{
         Metadata = [ordered]@{
             ToolName         = 'WinTriage'
             Version          = $script:WTVersion
@@ -602,17 +602,25 @@ function Get-WTMinimalDiskInfo {
     foreach ($drive in $drives) {
         $sizeBytes = [double]$drive.Size
         $freeBytes = [double]$drive.FreeSpace
-        $freePercent = 0
-        if ($sizeBytes -gt 0) {
+        $sizeKnown = $sizeBytes -gt 0
+        $freePercent = $null
+        $status = 'OK'
+
+        if ($sizeKnown) {
             $freePercent = [math]::Round(($freeBytes / $sizeBytes) * 100, 2)
+        }
+        else {
+            $status = 'UnknownSize'
         }
 
         $result += [pscustomobject]@{
             DriveLetter = $drive.DeviceID
             FileSystem  = $drive.FileSystem
-            SizeGB      = if ($sizeBytes -gt 0) { [math]::Round($sizeBytes / 1GB, 2) } else { $null }
+            SizeKnown   = $sizeKnown
+            SizeGB      = if ($sizeKnown) { [math]::Round($sizeBytes / 1GB, 2) } else { $null }
             FreeGB      = if ($freeBytes -gt 0) { [math]::Round($freeBytes / 1GB, 2) } else { 0 }
             FreePercent = $freePercent
+            Status      = $status
         }
     }
 
@@ -782,26 +790,6 @@ function Invoke-WinTriage {
         }
 
         Update-WTSummary -Report $report | Out-Null
-        $report.Metadata.FinishedAt = (Get-Date).ToString('o')
-
-        if (-not $script:WTIsJsonOnly) {
-            try {
-                Export-WTMarkdownReport -Report $report -Path $markdownPath | Out-Null
-                $report.Metadata.MarkdownGenerated = $true
-            }
-            catch {
-                Add-WTExecutionWarning -Report $report -Scope 'MarkdownExport' -Message ('Unable to write Markdown report. {0}' -f $_.Exception.Message)
-            }
-        }
-
-        if ($OpenReport.IsPresent -and -not $script:WTIsJsonOnly -and $report.Metadata.MarkdownGenerated) {
-            try {
-                Invoke-Item -LiteralPath $markdownPath
-            }
-            catch {
-                Add-WTExecutionWarning -Report $report -Scope 'OpenReport' -Message ('Unable to open Markdown report. {0}' -f $_.Exception.Message)
-            }
-        }
 
         if ($report.Summary.Critical -gt 0 -or $report.Summary.High -gt 0) {
             $exitCode = 1
@@ -814,8 +802,30 @@ function Invoke-WinTriage {
         }
 
         $report.Metadata.ExitCode = $exitCode
-        Export-WTJsonReport -Report $report -Path $jsonPath | Out-Null
+        $report.Metadata.FinishedAt = (Get-Date).ToString('o')
+
+        if (-not $script:WTIsJsonOnly) {
+            try {
+                Export-WTMarkdownReport -Report $report -Path $markdownPath | Out-Null
+                $report.Metadata.MarkdownGenerated = $true
+            }
+            catch {
+                Add-WTExecutionWarning -Report $report -Scope 'MarkdownExport' -Message ('Unable to write Markdown report. {0}' -f $_.Exception.Message)
+                $report.Metadata.MarkdownGenerated = $false
+            }
+        }
+
+        if ($OpenReport.IsPresent -and -not $script:WTIsJsonOnly -and $report.Metadata.MarkdownGenerated) {
+            try {
+                Invoke-Item -LiteralPath $markdownPath
+            }
+            catch {
+                Add-WTExecutionWarning -Report $report -Scope 'OpenReport' -Message ('Unable to open Markdown report. {0}' -f $_.Exception.Message)
+            }
+        }
+
         $report.Metadata.JsonGenerated = $true
+        Export-WTJsonReport -Report $report -Path $jsonPath | Out-Null
         Write-WTConsoleSummary -Report $report -NoColor:$script:WTNoColor
 
         return $exitCode
