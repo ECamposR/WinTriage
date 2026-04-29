@@ -15,7 +15,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.2.2'
+$script:WTVersion = '0.3.0'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -182,8 +182,12 @@ function New-WTReportObject {
             OutputBasePath   = $OutputBasePath
             OutputFallbackUsed = $UsedOutputFallback
             ReportDirectory    = $OutputDirectory
+            RawDirectory       = $null
             JsonPath           = $null
             MarkdownPath       = $null
+            EventCsvSystemPath = $null
+            EventCsvApplicationPath = $null
+            EventCsvAllPath    = $null
             JsonGenerated      = $false
             MarkdownGenerated  = $false
             ExitCode           = $null
@@ -583,6 +587,7 @@ function Write-WTConsoleSummary {
     $uptimeText = 'Unknown'
     $diskText = 'Unknown'
     $ramText = 'Unknown'
+    $eventsText = 'Unknown'
     $systemDriveLabel = 'C:'
 
     if ($Report.Normalized.System -and $Report.Normalized.System.OSCaption) {
@@ -609,6 +614,14 @@ function Write-WTConsoleSummary {
     if ($Report.Normalized.Performance -and $Report.Normalized.Performance.FreeRamPercent -ne $null) {
         $ramText = '{0}% free' -f $Report.Normalized.Performance.FreeRamPercent
     }
+    if ($Report.Normalized.Events) {
+        if (@($Report.Normalized.Events.LogsUnavailable).Count -ge 2 -and @($Report.Normalized.Events.AllEvents).Count -eq 0) {
+            $eventsText = 'Unknown'
+        }
+        else {
+            $eventsText = '{0} unexpected shutdowns, {1} bugchecks, {2} app crashes' -f @($Report.Normalized.Events.UnexpectedShutdownEvents).Count, @($Report.Normalized.Events.BugCheckEvents).Count, @($Report.Normalized.Events.ApplicationCrashEvents).Count
+        }
+    }
     if ($Report.Metadata.MarkdownGenerated) {
         $markdownPathText = $Report.Metadata.MarkdownPath
     }
@@ -629,6 +642,7 @@ function Write-WTConsoleSummary {
         ('Uptime: {0}' -f $uptimeText),
         ('Disk: {0}' -f $diskText),
         ('RAM: {0}' -f $ramText),
+        ('Events: {0}' -f $eventsText),
         ('Report directory: {0}' -f $Report.Metadata.ReportDirectory),
         ('JSON: {0}' -f $jsonPathText),
         ('Markdown: {0}' -f $markdownPathText),
@@ -651,11 +665,12 @@ function Write-WTConsoleSummary {
     Write-Host $lines[5] -ForegroundColor Gray
     Write-Host $lines[6] -ForegroundColor Gray
     Write-Host $lines[7] -ForegroundColor Gray
-    Write-Host $lines[8] -ForegroundColor DarkGray
-    Write-Host $lines[9] -ForegroundColor Gray
+    Write-Host $lines[8] -ForegroundColor Gray
+    Write-Host $lines[9] -ForegroundColor DarkGray
     Write-Host $lines[10] -ForegroundColor Gray
-    Write-Host $lines[11] -ForegroundColor DarkGray
-    Write-Host $lines[12] -ForegroundColor Green
+    Write-Host $lines[11] -ForegroundColor Gray
+    Write-Host $lines[12] -ForegroundColor DarkGray
+    Write-Host $lines[13] -ForegroundColor Green
 }
 
 function Export-WTJsonReport {
@@ -759,6 +774,63 @@ function Export-WTMarkdownReport {
         foreach ($process in $memoryRows) {
             [void]$sb.AppendLine(('- {0} (Id {1}, {2} MB, CPU {3})' -f $process.ProcessName, $process.Id, $process.WorkingSetMB, (ConvertTo-WTDisplayValue -Value $process.CPU)))
         }
+    }
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('## Event Overview')
+    [void]$sb.AppendLine('')
+    $eventOverview = $Report.Normalized.Events
+    if ($eventOverview) {
+        $windowStartText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $eventOverview.WindowStart) -Fallback 'Unknown'
+        $windowEndText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $eventOverview.WindowEnd) -Fallback 'Unknown'
+        $logsUnavailableText = 'None'
+        if ($eventOverview.LogsUnavailable -and @($eventOverview.LogsUnavailable).Count -gt 0) {
+            $logsUnavailableText = @($eventOverview.LogsUnavailable | ForEach-Object {
+                if ($_.LogName -and $_.Reason) {
+                    '{0}: {1}' -f $_.LogName, $_.Reason
+                }
+                elseif ($_.LogName) {
+                    $_.LogName
+                }
+                else {
+                    'Unknown'
+                }
+            }) -join ' | '
+        }
+
+        [void]$sb.AppendLine(('* WindowStart: {0}' -f $windowStartText))
+        [void]$sb.AppendLine(('* WindowEnd: {0}' -f $windowEndText))
+        [void]$sb.AppendLine(('* Days: {0}' -f (ConvertTo-WTDisplayValue -Value $eventOverview.Days)))
+        [void]$sb.AppendLine(('* Total events collected: {0}' -f (ConvertTo-WTDisplayValue -Value $eventOverview.TotalEvents)))
+        [void]$sb.AppendLine(('* System events: {0}' -f (ConvertTo-WTDisplayValue -Value $eventOverview.SystemEventCount)))
+        [void]$sb.AppendLine(('* Application events: {0}' -f (ConvertTo-WTDisplayValue -Value $eventOverview.ApplicationEventCount)))
+        [void]$sb.AppendLine(('* Unexpected shutdown events: {0}' -f (ConvertTo-WTDisplayValue -Value @($eventOverview.UnexpectedShutdownEvents).Count)))
+        [void]$sb.AppendLine(('* BugCheck events: {0}' -f (ConvertTo-WTDisplayValue -Value @($eventOverview.BugCheckEvents).Count)))
+        [void]$sb.AppendLine(('* Service failure events: {0}' -f (ConvertTo-WTDisplayValue -Value @($eventOverview.ServiceFailureEvents).Count)))
+        [void]$sb.AppendLine(('* Service install events: {0}' -f (ConvertTo-WTDisplayValue -Value @($eventOverview.ServiceInstallEvents).Count)))
+        [void]$sb.AppendLine(('* Application crash events: {0}' -f (ConvertTo-WTDisplayValue -Value @($eventOverview.ApplicationCrashEvents).Count)))
+        [void]$sb.AppendLine(('* Logs unavailable: {0}' -f $logsUnavailableText))
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Recent Important Events')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| TimeCreated | Log | Provider | Id | Level | MessageShort |')
+        [void]$sb.AppendLine('| --- | --- | --- | ---: | --- | --- |')
+        $recentEvents = @($eventOverview.RecentImportantEvents)
+        if ($recentEvents.Count -eq 0) {
+            [void]$sb.AppendLine('No relevant events found.')
+        }
+        else {
+            foreach ($evt in $recentEvents) {
+                $timeText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'
+                $logText = (ConvertTo-WTDisplayValue -Value $evt.LogName) -replace '\|', '\|'
+                $providerText = (ConvertTo-WTDisplayValue -Value $evt.ProviderName) -replace '\|', '\|'
+                $levelText = (ConvertTo-WTDisplayValue -Value $evt.LevelDisplayName) -replace '\|', '\|'
+                $messageText = (ConvertTo-WTDisplayValue -Value $evt.MessageShort) -replace '\|', '\|'
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} |' -f $timeText, $logText, $providerText, (ConvertTo-WTDisplayValue -Value $evt.Id), $levelText, $messageText))
+            }
+        }
+    }
+    else {
+        [void]$sb.AppendLine('No relevant events found.')
     }
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('## Findings')
@@ -1543,6 +1615,507 @@ function Invoke-WTPerformanceRules {
     }
 }
 
+function Get-WTEventCollectionLimit {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Mode
+    )
+
+    switch ($Mode) {
+        'Quick' { return 300 }
+        'Full' { return 3000 }
+        default { return 1000 }
+    }
+}
+
+function ConvertTo-WTEventMessageShort {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return 'No message available'
+    }
+
+    $shortMessage = ($Message -replace '[\r\n]+', ' ').Trim()
+    if ($shortMessage.Length -gt 500) {
+        return $shortMessage.Substring(0, 500)
+    }
+
+    return $shortMessage
+}
+
+function ConvertTo-WTEventRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$EventRecord
+    )
+
+    $message = $null
+    try {
+        $message = $EventRecord.Message
+    }
+    catch {
+        $message = $null
+    }
+
+    $timeCreated = $null
+    try {
+        $timeCreated = $EventRecord.TimeCreated
+    }
+    catch {
+        $timeCreated = $null
+    }
+
+    return [pscustomobject]@{
+        TimeCreated     = $timeCreated
+        LogName         = ConvertTo-WTDisplayValue -Value $EventRecord.LogName
+        ProviderName    = ConvertTo-WTDisplayValue -Value $EventRecord.ProviderName
+        Id              = if ($null -ne $EventRecord.Id) { [int]$EventRecord.Id } else { $null }
+        LevelDisplayName = ConvertTo-WTDisplayValue -Value $EventRecord.LevelDisplayName
+        Level           = if ($null -ne $EventRecord.Level) { [int]$EventRecord.Level } else { $null }
+        Message         = if ([string]::IsNullOrWhiteSpace($message)) { 'No message available' } else { $message }
+        MessageShort    = ConvertTo-WTEventMessageShort -Message $message
+        MachineName     = ConvertTo-WTDisplayValue -Value $EventRecord.MachineName
+    }
+}
+
+function Get-WTEventInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report,
+
+        [ValidateRange(1, 90)]
+        [int]$Days = 7,
+
+        [AllowNull()]
+        [string]$Mode = 'Standard'
+    )
+
+    $windowEnd = Get-Date
+    $windowStart = $windowEnd.AddDays(-1 * [math]::Abs($Days))
+    $limit = Get-WTEventCollectionLimit -Mode $Mode
+
+    $systemIds = @(41, 6008, 1074, 6005, 6006, 6009, 12, 13, 1001, 7000, 7001, 7009, 7011, 7022, 7023, 7024, 7031, 7034, 7045)
+    $applicationIds = @(1000, 1001)
+    $systemEvents = @()
+    $applicationEvents = @()
+    $logsUnavailable = @()
+    $eventCountsByLog = @()
+
+    $logDefinitions = @(
+        [pscustomobject]@{ LogName = 'System'; Ids = $systemIds; Target = 'SystemEvents' },
+        [pscustomobject]@{ LogName = 'Application'; Ids = $applicationIds; Target = 'ApplicationEvents' }
+    )
+
+    foreach ($logDefinition in $logDefinitions) {
+        $rawEvents = @()
+        try {
+            $query = @{
+                LogName   = $logDefinition.LogName
+                StartTime = $windowStart
+                Id        = $logDefinition.Ids
+            }
+            $rawEvents = @(Get-WinEvent -FilterHashtable $query -MaxEvents ($limit + 1) -ErrorAction Stop)
+        }
+        catch {
+            $reason = $_.Exception.Message
+            $logsUnavailable += [pscustomobject]@{
+                LogName = $logDefinition.LogName
+                Reason  = $reason
+            }
+            Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Event collection failed for {0}: {1}' -f $logDefinition.LogName, $reason)
+            continue
+        }
+
+        if ($rawEvents.Count -gt $limit) {
+            Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Event collection limit reached for {0}. Results may be incomplete.' -f $logDefinition.LogName)
+            $rawEvents = @($rawEvents | Select-Object -First $limit)
+        }
+
+        $normalizedEvents = @()
+        foreach ($event in $rawEvents) {
+            $normalizedEvents += ConvertTo-WTEventRecord -EventRecord $event
+        }
+
+        if ($logDefinition.Target -eq 'SystemEvents') {
+            $systemEvents = $normalizedEvents
+        }
+        else {
+            $applicationEvents = $normalizedEvents
+        }
+
+        $eventCountsByLog += [pscustomobject]@{
+            LogName = $logDefinition.LogName
+            Count   = @($normalizedEvents).Count
+        }
+    }
+
+    $allEvents = @($systemEvents + $applicationEvents | Sort-Object -Property TimeCreated -Descending)
+
+    $eventCountsById = @(
+        $allEvents |
+            Group-Object -Property Id |
+            Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name } } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Id    = $_.Name
+                    Count = $_.Count
+                }
+            }
+    )
+
+    $eventCountsByProvider = @(
+        $allEvents |
+            Group-Object -Property ProviderName |
+            Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name } } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    ProviderName = $_.Name
+                    Count        = $_.Count
+                }
+            }
+    )
+
+    return [pscustomobject]@{
+        WindowStart          = $windowStart
+        WindowEnd            = $windowEnd
+        Days                 = $Days
+        LogsQueried          = @('System', 'Application')
+        LogsUnavailable      = @($logsUnavailable)
+        SystemEvents         = @($systemEvents)
+        ApplicationEvents    = @($applicationEvents)
+        AllEvents            = @($allEvents)
+        EventCountsByLog     = @($eventCountsByLog)
+        EventCountsById      = @($eventCountsById)
+        EventCountsByProvider = @($eventCountsByProvider)
+    }
+}
+
+function ConvertTo-WTNormalizedEventInfo {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$EventInfo
+    )
+
+    if (-not $EventInfo) {
+        return [pscustomobject]@{
+            WindowStart              = $null
+            WindowEnd                = $null
+            Days                     = $null
+            TotalEvents              = 0
+            SystemEventCount         = 0
+            ApplicationEventCount    = 0
+            UnexpectedShutdownEvents = @()
+            KernelPowerEvents        = @()
+            BugCheckEvents           = @()
+            NormalShutdownEvents     = @()
+            ServiceFailureEvents     = @()
+            ServiceInstallEvents     = @()
+            ApplicationCrashEvents   = @()
+            WindowsErrorReportingEvents = @()
+            EventsById               = @()
+            EventsByProvider         = @()
+            EventCountsByLog         = @()
+            EventCountsById          = @()
+            EventCountsByProvider    = @()
+            RecentCriticalEvents     = @()
+            RecentWarningEvents      = @()
+            RecentImportantEvents    = @()
+            LogsQueried              = @()
+            LogsUnavailable          = @()
+            AllEvents                = @()
+            SystemEvents             = @()
+            ApplicationEvents        = @()
+        }
+    }
+
+    $systemEvents = @($EventInfo.SystemEvents | Where-Object { $_ })
+    $applicationEvents = @($EventInfo.ApplicationEvents | Where-Object { $_ })
+    $allEvents = @($EventInfo.AllEvents | Where-Object { $_ } | Sort-Object -Property TimeCreated -Descending)
+
+    $unexpectedShutdownEvents = @($systemEvents | Where-Object { $_.Id -in @(41, 6008) })
+    $kernelPowerEvents = @($systemEvents | Where-Object { $_.Id -eq 41 })
+    $bugCheckEvents = @($systemEvents | Where-Object {
+        $_.Id -eq 1001 -and (
+            $_.ProviderName -match 'BugCheck|System Error Reporting|SystemErrorReporting' -or
+            $_.MessageShort -match 'bugcheck'
+        )
+    })
+    $normalShutdownEvents = @($systemEvents | Where-Object { $_.Id -in @(1074, 6006, 13) })
+    $serviceFailureEvents = @($systemEvents | Where-Object { $_.Id -in @(7000, 7001, 7009, 7011, 7022, 7023, 7024, 7031, 7034) })
+    $serviceInstallEvents = @($systemEvents | Where-Object { $_.Id -eq 7045 })
+    $applicationCrashEvents = @($applicationEvents | Where-Object {
+        $_.Id -eq 1000 -or ($_.Id -eq 1001 -and $_.ProviderName -match 'Windows Error Reporting')
+    })
+    $windowsErrorReportingEvents = @($allEvents | Where-Object {
+        $_.Id -eq 1001 -and ($_.ProviderName -match 'Windows Error Reporting' -or $_.ProviderName -match 'System Error Reporting')
+    })
+
+    $eventsById = @(
+        $allEvents |
+            Group-Object -Property Id |
+            Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name } } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Id    = $_.Name
+                    Count = $_.Count
+                }
+            }
+    )
+
+    $eventsByProvider = @(
+        $allEvents |
+            Group-Object -Property ProviderName |
+            Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name } } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    ProviderName = $_.Name
+                    Count        = $_.Count
+                }
+            }
+    )
+
+    $recentCriticalEvents = @($allEvents | Where-Object { $_.LevelDisplayName -in @('Critical', 'Error') } | Select-Object -First 20)
+    $recentWarningEvents = @($allEvents | Where-Object { $_.LevelDisplayName -eq 'Warning' } | Select-Object -First 20)
+
+    $importantIds = @(41, 6008, 1074, 6006, 13, 1001, 1000, 7000, 7001, 7009, 7011, 7022, 7023, 7024, 7031, 7034, 7045)
+    $recentImportantEvents = @(
+        $allEvents | Where-Object {
+            $_.Id -in $importantIds -or $_.LevelDisplayName -in @('Critical', 'Error', 'Warning')
+        } | Select-Object -First 20
+    )
+
+    return [pscustomobject]@{
+        WindowStart                 = $EventInfo.WindowStart
+        WindowEnd                   = $EventInfo.WindowEnd
+        Days                        = $EventInfo.Days
+        TotalEvents                 = @($allEvents).Count
+        SystemEventCount            = @($systemEvents).Count
+        ApplicationEventCount       = @($applicationEvents).Count
+        UnexpectedShutdownEvents    = @($unexpectedShutdownEvents)
+        KernelPowerEvents           = @($kernelPowerEvents)
+        BugCheckEvents              = @($bugCheckEvents)
+        NormalShutdownEvents        = @($normalShutdownEvents)
+        ServiceFailureEvents        = @($serviceFailureEvents)
+        ServiceInstallEvents        = @($serviceInstallEvents)
+        ApplicationCrashEvents      = @($applicationCrashEvents)
+        WindowsErrorReportingEvents  = @($windowsErrorReportingEvents)
+        EventsById                  = @($eventsById)
+        EventsByProvider            = @($eventsByProvider)
+        EventCountsByLog            = @($EventInfo.EventCountsByLog)
+        EventCountsById             = @($EventInfo.EventCountsById)
+        EventCountsByProvider       = @($EventInfo.EventCountsByProvider)
+        RecentCriticalEvents        = @($recentCriticalEvents)
+        RecentWarningEvents         = @($recentWarningEvents)
+        RecentImportantEvents       = @($recentImportantEvents)
+        LogsQueried                 = @($EventInfo.LogsQueried)
+        LogsUnavailable             = @($EventInfo.LogsUnavailable)
+        AllEvents                   = @($allEvents)
+        SystemEvents                = @($systemEvents)
+        ApplicationEvents           = @($applicationEvents)
+    }
+}
+
+function Export-WTEventCsv {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report,
+
+        [AllowNull()]
+        [psobject]$EventInfo
+    )
+
+    $rawDirectory = Join-Path -Path $Report.Metadata.ReportDirectory -ChildPath 'raw'
+    try {
+        [void][System.IO.Directory]::CreateDirectory($rawDirectory)
+    }
+    catch {
+        Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Unable to create raw event output directory: {0}' -f $_.Exception.Message)
+        return $null
+    }
+
+    $Report.Metadata.RawDirectory = $rawDirectory
+    $Report.Metadata.EventCsvSystemPath = ConvertTo-WTAbsolutePath -Path (Join-Path -Path $rawDirectory -ChildPath 'events-system.csv')
+    $Report.Metadata.EventCsvApplicationPath = ConvertTo-WTAbsolutePath -Path (Join-Path -Path $rawDirectory -ChildPath 'events-application.csv')
+    $Report.Metadata.EventCsvAllPath = ConvertTo-WTAbsolutePath -Path (Join-Path -Path $rawDirectory -ChildPath 'events-all.csv')
+
+    $header = 'TimeCreated,LogName,ProviderName,Id,LevelDisplayName,MessageShort,MachineName'
+
+    $writeCsv = {
+        param(
+            [string]$Path,
+            [object[]]$Rows
+        )
+
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add($header) | Out-Null
+        foreach ($row in @($Rows)) {
+            if (-not $row) {
+                continue
+            }
+            $timeText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $row.TimeCreated) -Fallback ''
+            $cells = @(
+                $timeText,
+                $row.LogName,
+                $row.ProviderName,
+                $row.Id,
+                $row.LevelDisplayName,
+                $row.MessageShort,
+                $row.MachineName
+            )
+            $escaped = foreach ($cell in $cells) {
+                if ($null -eq $cell) { '' }
+                else {
+                    ('"{0}"' -f (('' + $cell) -replace '"', '""'))
+                }
+            }
+            $lines.Add(($escaped -join ',')) | Out-Null
+        }
+
+        [System.IO.File]::WriteAllLines($Path, $lines.ToArray(), [System.Text.Encoding]::UTF8)
+    }
+
+    try {
+        $systemRows = @($EventInfo.SystemEvents)
+        $applicationRows = @($EventInfo.ApplicationEvents)
+        $allRows = @($EventInfo.AllEvents)
+        & $writeCsv -Path $Report.Metadata.EventCsvSystemPath -Rows $systemRows
+        & $writeCsv -Path $Report.Metadata.EventCsvApplicationPath -Rows $applicationRows
+        & $writeCsv -Path $Report.Metadata.EventCsvAllPath -Rows $allRows
+    }
+    catch {
+        Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Unable to write event CSV exports: {0}' -f $_.Exception.Message)
+    }
+
+    return [pscustomobject]@{
+        RawDirectory             = $rawDirectory
+        SystemCsvPath            = $Report.Metadata.EventCsvSystemPath
+        ApplicationCsvPath        = $Report.Metadata.EventCsvApplicationPath
+        AllCsvPath               = $Report.Metadata.EventCsvAllPath
+    }
+}
+
+function Invoke-WTEventRules {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report
+    )
+
+    $events = $Report.Normalized.Events
+    if (-not $events) {
+        return
+    }
+
+    if (@($events.UnexpectedShutdownEvents).Count -gt 0) {
+        $ids = @($events.UnexpectedShutdownEvents | Select-Object -ExpandProperty Id -Unique | Sort-Object)
+        $latest = @($events.UnexpectedShutdownEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        Add-WTFinding -Report $Report -Id 'WT-EVT-UNEXPECTED-SHUTDOWN' -Category 'Events' -Severity 'High' -Title 'Unexpected shutdown or power loss detected' -Description 'Windows logged one or more unexpected shutdown or Kernel-Power events within the analysis window.' -Evidence @("Count=$(@($events.UnexpectedShutdownEvents).Count)", ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latest[0].TimeCreated)), ('Ids={0}' -f ($ids -join ', '))) -Recommendation 'Review whether the device experienced power loss, forced shutdown, freeze, crash, or hardware instability. Correlate with BugCheck and Disk events.' -Source 'Invoke-WTEventRules' -Status 'Warning'
+    }
+
+    if (@($events.BugCheckEvents).Count -gt 0) {
+        $latestBugcheck = @($events.BugCheckEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        $providerNames = @($events.BugCheckEvents | Select-Object -ExpandProperty ProviderName -Unique | Sort-Object)
+        Add-WTFinding -Report $Report -Id 'WT-EVT-BUGCHECK-DETECTED' -Category 'Events' -Severity 'Critical' -Title 'Possible BSOD or bugcheck detected' -Description 'Windows logged a bugcheck or system error reporting event within the analysis window.' -Evidence @("Count=$(@($events.BugCheckEvents).Count)", ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestBugcheck[0].TimeCreated)), ('Providers={0}' -f ($providerNames -join ', ')), ('MessageShort={0}' -f $latestBugcheck[0].MessageShort) ) -Recommendation 'Review minidump files, driver updates, recent hardware/software changes, and correlate with Kernel-Power events.' -Source 'Invoke-WTEventRules' -Status 'Fail'
+    }
+
+    if (@($events.ServiceFailureEvents).Count -ge 5) {
+        $ids = @($events.ServiceFailureEvents | Group-Object -Property Id | Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name } } | Select-Object -First 5 | ForEach-Object { '{0}({1})' -f $_.Name, $_.Count })
+        $latestServiceFailure = @($events.ServiceFailureEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        $providers = @($events.ServiceFailureEvents | Select-Object -ExpandProperty ProviderName -Unique | Sort-Object)
+        Add-WTFinding -Report $Report -Id 'WT-EVT-SERVICE-FAILURES' -Category 'Events' -Severity 'Medium' -Title 'Repeated service failures detected' -Description 'Multiple Service Control Manager failure events were found.' -Evidence @("Count=$(@($events.ServiceFailureEvents).Count)", ('Ids={0}' -f ($ids -join ', ')), ('Providers={0}' -f ($providers -join ', ')), ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestServiceFailure[0].TimeCreated))) -Recommendation 'Review affected services, startup type, dependencies and recent software changes.' -Source 'Invoke-WTEventRules' -Status 'Warning'
+    }
+
+    if (@($events.ServiceInstallEvents).Count -gt 0) {
+        $latestServiceInstall = @($events.ServiceInstallEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        $messages = @($events.ServiceInstallEvents | Select-Object -First 3 | ForEach-Object { $_.MessageShort })
+        Add-WTFinding -Report $Report -Id 'WT-EVT-SERVICE-INSTALL' -Category 'Events' -Severity 'Info' -Title 'Service installation events detected' -Description 'Windows logged service installation events within the analysis window.' -Evidence @("Count=$(@($events.ServiceInstallEvents).Count)", ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestServiceInstall[0].TimeCreated)), ('RecentMessages={0}' -f ($messages -join ' | '))) -Recommendation 'Validate whether recently installed services are expected, especially if they occurred near crashes or unexpected shutdowns.' -Source 'Invoke-WTEventRules' -Status 'Info'
+    }
+
+    if (@($events.ApplicationCrashEvents).Count -ge 3) {
+        $latestCrash = @($events.ApplicationCrashEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        $procs = @($events.ApplicationCrashEvents | ForEach-Object {
+            if ($_.MessageShort -match 'Faulting application name:\s*([^,]+)') { $Matches[1].Trim() }
+        } | Where-Object { $_ } | Group-Object | Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name } } | Select-Object -First 5 | ForEach-Object { '{0}({1})' -f $_.Name, $_.Count })
+        Add-WTFinding -Report $Report -Id 'WT-EVT-APP-CRASHES' -Category 'Events' -Severity 'Medium' -Title 'Repeated application crashes detected' -Description 'Multiple application crash or Windows Error Reporting events were found.' -Evidence @("Count=$(@($events.ApplicationCrashEvents).Count)", ('Processes={0}' -f ($procs -join ', ')), ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestCrash[0].TimeCreated))) -Recommendation 'Review affected application, user reports, updates, add-ins, profile issues, and local dependencies.' -Source 'Invoke-WTEventRules' -Status 'Warning'
+    }
+
+    $hasEventData = @($events.AllEvents).Count -gt 0 -or @($events.LogsUnavailable).Count -lt @($events.LogsQueried).Count
+    if ($hasEventData -and @($events.UnexpectedShutdownEvents).Count -eq 0 -and @($events.BugCheckEvents).Count -eq 0 -and @($events.ServiceFailureEvents).Count -eq 0 -and @($events.ServiceInstallEvents).Count -eq 0 -and @($events.ApplicationCrashEvents).Count -eq 0) {
+        Add-WTFinding -Report $Report -Id 'WT-EVT-NO-CRITICAL-EVENTS' -Category 'Events' -Severity 'Info' -Title 'No critical System/Application events detected' -Description 'No relevant critical System or Application events were found in the selected analysis window.' -Evidence @("Days=$($events.Days)", "TotalEvents=$($events.TotalEvents)") -Recommendation 'No action required based on this event scope.' -Source 'Invoke-WTEventRules' -Status 'Pass'
+    }
+}
+
+function Invoke-WTEventCorrelationRules {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report
+    )
+
+    $events = $Report.Normalized.Events
+    if (-not $events) {
+        return
+    }
+
+    $unexpectedEvents = @($events.UnexpectedShutdownEvents | Sort-Object -Property TimeCreated)
+    $bugcheckEvents = @($events.BugCheckEvents | Sort-Object -Property TimeCreated)
+    $serviceInstallEvents = @($events.ServiceInstallEvents | Sort-Object -Property TimeCreated)
+
+    $bestBugcheckMatch = $null
+    foreach ($shutdownEvent in $unexpectedEvents) {
+        foreach ($bugcheckEvent in $bugcheckEvents) {
+            if ($null -eq $shutdownEvent.TimeCreated -or $null -eq $bugcheckEvent.TimeCreated) {
+                continue
+            }
+            $delta = [math]::Abs(($shutdownEvent.TimeCreated - $bugcheckEvent.TimeCreated).TotalMinutes)
+            if ($delta -le 30 -and (-not $bestBugcheckMatch -or $delta -lt $bestBugcheckMatch.DeltaMinutes)) {
+                $bestBugcheckMatch = [pscustomobject]@{
+                    ShutdownEvent = $shutdownEvent
+                    BugCheckEvent = $bugcheckEvent
+                    DeltaMinutes  = [math]::Round($delta, 2)
+                }
+            }
+        }
+    }
+
+    if ($bestBugcheckMatch) {
+        Add-WTFinding -Report $Report -Id 'WT-CORR-BSOD-REBOOT' -Category 'Correlation' -Severity 'Critical' -Title 'BugCheck correlated with unexpected reboot' -Description 'A bugcheck event was found near an unexpected shutdown or Kernel-Power event.' -Evidence @(('ShutdownTime={0}' -f (ConvertTo-WTDateTimeString -Value $bestBugcheckMatch.ShutdownEvent.TimeCreated)), ('BugCheckTime={0}' -f (ConvertTo-WTDateTimeString -Value $bestBugcheckMatch.BugCheckEvent.TimeCreated)), ('DeltaMinutes={0}' -f $bestBugcheckMatch.DeltaMinutes), ('Ids={0}/{1}' -f $bestBugcheckMatch.ShutdownEvent.Id, $bestBugcheckMatch.BugCheckEvent.Id)) -Recommendation 'Prioritize BSOD troubleshooting. Review minidump, drivers, firmware, storage and recent changes.' -Source 'Invoke-WTEventCorrelationRules' -Status 'Fail'
+    }
+
+    $bestServiceMatch = $null
+    foreach ($shutdownEvent in $unexpectedEvents) {
+        foreach ($serviceEvent in $serviceInstallEvents) {
+            if ($null -eq $shutdownEvent.TimeCreated -or $null -eq $serviceEvent.TimeCreated) {
+                continue
+            }
+            $delta = ($shutdownEvent.TimeCreated - $serviceEvent.TimeCreated).TotalHours
+            if ($delta -ge 0 -and $delta -le 24) {
+                $deltaMinutes = [math]::Round(($shutdownEvent.TimeCreated - $serviceEvent.TimeCreated).TotalMinutes, 2)
+                if (-not $bestServiceMatch -or $deltaMinutes -lt $bestServiceMatch.DeltaMinutes) {
+                    $bestServiceMatch = [pscustomobject]@{
+                        ShutdownEvent = $shutdownEvent
+                        ServiceEvent = $serviceEvent
+                        DeltaMinutes = $deltaMinutes
+                    }
+                }
+            }
+        }
+    }
+
+    if ($bestServiceMatch) {
+        Add-WTFinding -Report $Report -Id 'WT-CORR-SERVICE-INSTALL-REBOOT' -Category 'Correlation' -Severity 'Medium' -Title 'Service installation occurred before unexpected reboot' -Description 'A service installation event was detected shortly before an unexpected reboot or power event.' -Evidence @(('ServiceInstallTime={0}' -f (ConvertTo-WTDateTimeString -Value $bestServiceMatch.ServiceEvent.TimeCreated)), ('ShutdownTime={0}' -f (ConvertTo-WTDateTimeString -Value $bestServiceMatch.ShutdownEvent.TimeCreated)), ('DeltaMinutes={0}' -f $bestServiceMatch.DeltaMinutes), ('MessageShort={0}' -f $bestServiceMatch.ServiceEvent.MessageShort)) -Recommendation 'Validate whether the installed service is expected and whether it may relate to instability.' -Source 'Invoke-WTEventCorrelationRules' -Status 'Warning'
+    }
+}
+
 function Get-WTBasicSystemInfo {
     [CmdletBinding()]
     param()
@@ -1626,6 +2199,19 @@ function Invoke-WinTriage {
             } | Out-Null
         }
 
+        $eventRaw = Invoke-WTSafeCollector -Report $report -Name 'EventInfo' -ScriptBlock {
+            Get-WTEventInfo -Report $report -Days $Days -Mode $mode
+        }
+        if ($eventRaw) {
+            $report.Raw.Events = $eventRaw
+        }
+        Invoke-WTSafeStep -Report $report -Name 'NormalizeEvents' -ScriptBlock {
+            $report.Normalized.Events = ConvertTo-WTNormalizedEventInfo -EventInfo $report.Raw.Events
+        } | Out-Null
+        Invoke-WTSafeStep -Report $report -Name 'ExportEventCsv' -ScriptBlock {
+            Export-WTEventCsv -Report $report -EventInfo $report.Raw.Events | Out-Null
+        } | Out-Null
+
         $report.Raw.Updates = [pscustomobject]@{
             Status = 'NotImplemented'
             Mode   = $mode
@@ -1648,11 +2234,6 @@ function Invoke-WinTriage {
             Status = 'NotImplemented'
         }
         $report.Normalized.Services = $report.Raw.Services
-
-        $report.Raw.Events = [pscustomobject]@{
-            Status = 'NotImplemented'
-        }
-        $report.Normalized.Events = $report.Raw.Events
 
         Add-WTFinding -Report $report `
             -Id 'WT-RO-001' `
@@ -1686,6 +2267,12 @@ function Invoke-WinTriage {
         } | Out-Null
         Invoke-WTSafeStep -Report $report -Name 'PerformanceRules' -ScriptBlock {
             Invoke-WTPerformanceRules -Report $report
+        } | Out-Null
+        Invoke-WTSafeStep -Report $report -Name 'EventRules' -ScriptBlock {
+            Invoke-WTEventRules -Report $report
+        } | Out-Null
+        Invoke-WTSafeStep -Report $report -Name 'EventCorrelationRules' -ScriptBlock {
+            Invoke-WTEventCorrelationRules -Report $report
         } | Out-Null
 
         if (-not $isAdmin) {

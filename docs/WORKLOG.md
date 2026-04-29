@@ -15,3 +15,4 @@
 - Fixed initialization crashes caused by null-binding in helpers and added safe-step handling plus partial report recovery on fatal errors.
 - Tightened report naming to use millisecond timestamps plus incremental suffixes, added `RunId`, and corrected build rendering in console and Markdown output.
 - Updated report naming consistency and metadata/output formatting so repeated runs do not collide and build text is always populated or marked unknown.
+- Added first real System/Application event module with CSV export, event overview Markdown, and initial shutdown/bugcheck/service/app-crash findings plus basic correlations.
