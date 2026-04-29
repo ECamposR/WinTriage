@@ -1,0 +1,8 @@
+# WinTriage project ignores
+.codex
+Reports/
+*.log
+*.tmp
+*.bak
+*.swp
+
