@@ -23,3 +23,5 @@
 - Tightened Spanish `Application Error 1000` parsing, added an internal warning when process extraction fails, and reduced WER noise in `Recent Important Events`.
 - Restored APPCRASH/Application Error enrichment for `AffectedProcess`, `AffectedPath`, and `ProcessSourcePattern`, then rebalanced crash summaries and event prioritization.
 - Repaired regression in APPCRASH/Application Error parsing so enriched process fields are populated again and crash summaries no longer collapse to `Unknown`.
+- Added a dedicated `Application Error 1000` parser path for Spanish faulting application names and paths so `mxdhcp.exe` style crashes enrich correctly again.
+- Bumped script version to `0.3.6` after restoring the Spanish `Application Error 1000` parser path.

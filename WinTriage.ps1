@@ -15,7 +15,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.3.5'
+$script:WTVersion = '0.3.6'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -1853,6 +1853,109 @@ function Get-WTWerEventName {
     return $null
 }
 
+function Get-WTApplicationErrorProcessInfo {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Message,
+
+        [AllowNull()]
+        [string]$MessageShort
+    )
+
+    $texts = @()
+    if (-not [string]::IsNullOrWhiteSpace($Message)) {
+        $texts += $Message
+    }
+    if (-not [string]::IsNullOrWhiteSpace($MessageShort)) {
+        $texts += $MessageShort
+    }
+
+    if ($texts.Count -eq 0) {
+        return [pscustomobject]@{
+            ProcessName   = $null
+            ProcessPath   = $null
+            SourcePattern = $null
+        }
+    }
+
+    $namePatterns = @(
+        'Nombre de aplicación con errores:\s*(?<name>[^,\r\n]+)',
+        'Faulting application name:\s*(?<name>[^,\r\n]+)'
+    )
+    $pathPatterns = @(
+        'Ruta de aplicación con errores:\s*(?<path>.+?)(?=\r?\n(?:Ruta de módulo con errores:|Id\. de informe:|Nombre completo del paquete con errores:|Faulting module path:|Report Id:|Faulting package full name:)|$)',
+        'Faulting application path:\s*(?<path>.+?)(?=\r?\n(?:Faulting module path:|Report Id:|Faulting package full name:|Id\. de informe:)|$)',
+        'Ruta de módulo con errores:\s*(?<path>.+?)(?=\r?\n(?:Id\. de informe:|Nombre completo del paquete con errores:|Report Id:|Faulting package full name:)|$)',
+        'Faulting module path:\s*(?<path>.+?)(?=\r?\n(?:Report Id:|Faulting package full name:|Id\. de informe:)|$)'
+    )
+
+    $processName = $null
+    $processPath = $null
+    $sourcePattern = $null
+
+    foreach ($text in $texts) {
+        foreach ($pattern in $namePatterns) {
+            if (-not $processName -and $text -match $pattern) {
+                $candidateName = Normalize-WTProcessName -Value $Matches.name -RequireExecutable
+                if ($candidateName) {
+                    $processName = $candidateName
+                    if (-not $sourcePattern) {
+                        if ($pattern -like 'Nombre de aplicación con errores:*') {
+                            $sourcePattern = 'SpanishFaultingApplicationName'
+                        }
+                        else {
+                            $sourcePattern = 'EnglishFaultingApplicationName'
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach ($pattern in $pathPatterns) {
+            if (-not $processPath -and $text -match $pattern) {
+                $candidatePath = Normalize-WTProcessPath -Value $Matches.path
+                if ($candidatePath) {
+                    $processPath = $candidatePath
+                    if (-not $sourcePattern) {
+                        if ($pattern -like 'Ruta de aplicación con errores:*') {
+                            $sourcePattern = 'SpanishFaultingApplicationPath'
+                        }
+                        elseif ($pattern -like 'Ruta de módulo con errores:*') {
+                            $sourcePattern = 'SpanishFaultingModulePath'
+                        }
+                        elseif ($pattern -like 'Faulting application path:*') {
+                            $sourcePattern = 'EnglishFaultingApplicationPath'
+                        }
+                        else {
+                            $sourcePattern = 'EnglishFaultingModulePath'
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($processName -and $processPath) {
+            break
+        }
+    }
+
+    if (-not $processName -and $processPath) {
+        try {
+            $processName = Normalize-WTProcessName -Value ([System.IO.Path]::GetFileName($processPath)) -RequireExecutable
+        }
+        catch {
+            $processName = $null
+        }
+    }
+
+    return [pscustomobject]@{
+        ProcessName   = $processName
+        ProcessPath   = $processPath
+        SourcePattern = $sourcePattern
+    }
+}
+
 function Get-WTEventProcessName {
     [CmdletBinding()]
     param(
@@ -1872,110 +1975,52 @@ function Get-WTEventProcessName {
         [string]$WerEventName
     )
 
-    $texts = @()
-    if (-not [string]::IsNullOrWhiteSpace($Message)) {
-        $texts += $Message
-    }
-    if (-not [string]::IsNullOrWhiteSpace($MessageShort)) {
-        $texts += $MessageShort
-    }
-
-    if ($texts.Count -eq 0) {
-        return [pscustomobject]@{
-            ProcessName   = $null
-            ProcessPath   = $null
-            SourcePattern = $null
-        }
-    }
-
-    $crashSignal = $false
-    if ($WerEventName -and $WerEventName -match '^(APPCRASH|BEX|CLR20r3|MoAppCrash)$') {
-        $crashSignal = $true
-    }
-    elseif (($ProviderName -eq 'Windows Error Reporting' -and $Id -eq 1001) -and (
-        (-not [string]::IsNullOrWhiteSpace($Message) -and $Message -match '(?im)^\s*(Nombre de evento|Event Name):\s*(APPCRASH|BEX|CLR20r3|MoAppCrash)\b') -or
-        (-not [string]::IsNullOrWhiteSpace($MessageShort) -and $MessageShort -match '(?im)^\s*(Nombre de evento|Event Name):\s*(APPCRASH|BEX|CLR20r3|MoAppCrash)\b')
-    )) {
-        $crashSignal = $true
-    }
-
-    $patterns = @(
-        [pscustomobject]@{ Name = 'SpanishFaultingApplicationName'; Type = 'Name'; Regex = 'Nombre de aplicación con errores:\s*([^,\r\n]+)'; RequireExecutable = $true },
-        [pscustomobject]@{ Name = 'SpanishFaultingApplicationPath'; Type = 'Path'; Regex = 'Ruta de aplicación con errores:\s*([^\r\n]+)'; RequireExecutable = $false },
-        [pscustomobject]@{ Name = 'SpanishFaultingModulePath'; Type = 'Path'; Regex = 'Ruta de módulo con errores:\s*([^\r\n]+)'; RequireExecutable = $false },
-        [pscustomobject]@{ Name = 'EnglishFaultingApplicationName'; Type = 'Name'; Regex = 'Faulting application name:\s*([^,\r\n]+)'; RequireExecutable = $true },
-        [pscustomobject]@{ Name = 'EnglishFaultingApplicationPath'; Type = 'Path'; Regex = 'Faulting application path:\s*([^\r\n]+)'; RequireExecutable = $false },
-        [pscustomobject]@{ Name = 'EnglishFaultingModulePath'; Type = 'Path'; Regex = 'Faulting module path:\s*([^\r\n]+)'; RequireExecutable = $false }
-    )
-
     $processName = $null
     $processPath = $null
     $sourcePattern = $null
 
-    foreach ($text in $texts) {
-        foreach ($pattern in $patterns) {
-            if (-not $processName -and $text -match $pattern.Regex) {
-                $candidate = Normalize-WTProcessName -Value $Matches[1] -RequireExecutable:([bool]$pattern.RequireExecutable)
-                if ($candidate) {
-                    $processName = $candidate
-                    if (-not $sourcePattern) {
-                        $sourcePattern = $pattern.Name
-                    }
-                }
-            }
-        }
-
-        foreach ($pattern in $patterns) {
-            if (-not $processPath -and $text -match $pattern.Regex) {
-                $candidatePath = Normalize-WTProcessPath -Value $Matches[1]
-                if ($candidatePath) {
-                    $processPath = $candidatePath
-                    if (-not $sourcePattern) {
-                        $sourcePattern = $pattern.Name
-                    }
-                }
-            }
-        }
-
-        if ($processName -and $processPath) {
-            break
+    if ($ProviderName -eq 'Application Error' -and $Id -eq 1000) {
+        $appInfo = Get-WTApplicationErrorProcessInfo -Message $Message -MessageShort $MessageShort
+        if ($appInfo) {
+            $processName = $appInfo.ProcessName
+            $processPath = $appInfo.ProcessPath
+            $sourcePattern = $appInfo.SourcePattern
         }
     }
 
-    if (-not $processName -and $processPath) {
-        try {
-            $processName = Normalize-WTProcessName -Value ([System.IO.Path]::GetFileName($processPath))
+    if (-not $processName -and -not $processPath) {
+        $texts = @()
+        if (-not [string]::IsNullOrWhiteSpace($Message)) {
+            $texts += $Message
         }
-        catch {
-            $processName = $null
+        if (-not [string]::IsNullOrWhiteSpace($MessageShort)) {
+            $texts += $MessageShort
         }
-    }
 
-    if (-not $processName -and $crashSignal) {
-        foreach ($text in $texts) {
-            if ([string]::IsNullOrWhiteSpace($text)) {
-                continue
+        if ($texts.Count -gt 0) {
+            $crashSignal = $false
+            if ($WerEventName -and $WerEventName -match '^(APPCRASH|BEX|CLR20r3|MoAppCrash)$') {
+                $crashSignal = $true
             }
-            if ($text -match '(?im)^\s*P1:\s*([^\r\n]+)') {
-                $candidate = Normalize-WTProcessName -Value $Matches[1] -RequireExecutable
-                if ($candidate) {
-                    $processName = $candidate
-                    if (-not $sourcePattern) {
-                        $sourcePattern = 'WerP1CrashExecutable'
+            elseif (($ProviderName -eq 'Windows Error Reporting' -and $Id -eq 1001) -and (
+                (-not [string]::IsNullOrWhiteSpace($Message) -and $Message -match '(?im)^\s*(Nombre de evento|Event Name):\s*(APPCRASH|BEX|CLR20r3|MoAppCrash)\b') -or
+                (-not [string]::IsNullOrWhiteSpace($MessageShort) -and $MessageShort -match '(?im)^\s*(Nombre de evento|Event Name):\s*(APPCRASH|BEX|CLR20r3|MoAppCrash)\b')
+            )) {
+                $crashSignal = $true
+            }
+
+            if ($crashSignal) {
+                foreach ($text in $texts) {
+                    if ($text -match '(?im)^\s*P1:\s*(?<candidate>[^\r\n]+)') {
+                        $candidate = Normalize-WTProcessName -Value $Matches.candidate -RequireExecutable
+                        if ($candidate) {
+                            $processName = $candidate
+                            $sourcePattern = 'WerP1CrashExecutable'
+                            break
+                        }
                     }
-                    break
                 }
             }
-        }
-    }
-
-    if (-not $processName -and $processPath) {
-        try {
-            $derivedName = [System.IO.Path]::GetFileName($processPath)
-            $processName = Normalize-WTProcessName -Value $derivedName
-        }
-        catch {
-            $processName = $null
         }
     }
 
@@ -2685,7 +2730,7 @@ function Invoke-WinTriage {
         }
 
         if ($eventProcessParsingWarningNeeded) {
-            Add-WTExecutionWarning -Report $report -Scope 'EventProcessParsing' -Message 'Application crash event contains a process name pattern but process extraction failed.'
+            Add-WTExecutionWarning -Report $report -Scope 'EventProcessParsing' -Message 'Application Error event contains a Spanish faulting application name but process extraction failed.'
         }
 
         $report.Raw.Updates = [pscustomobject]@{
