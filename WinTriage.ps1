@@ -17,7 +17,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.5.1'
+$script:WTVersion = '0.6.0'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -645,6 +645,9 @@ function Test-WTRequiredFunctions {
         'Get-WTDefenderInfo'
         'ConvertTo-WTNormalizedDefenderInfo'
         'Invoke-WTDefenderRules'
+        'Get-WTServicesInfo'
+        'ConvertTo-WTNormalizedServicesInfo'
+        'Invoke-WTServicesRules'
     )
 
     $missing = @()
@@ -684,6 +687,7 @@ function Write-WTConsoleSummary {
     $powerText = 'Fast Startup Unknown, recent shutdowns Unknown, unexpected Unknown'
     $updatesText = 'Unknown'
     $securityText = 'Unknown'
+    $servicesText = 'Unknown'
     $eventsText = 'Unknown'
     $systemDriveLabel = 'C:'
     $powerBoot = $Report.Normalized.PowerBoot
@@ -750,6 +754,9 @@ function Write-WTConsoleSummary {
             $securityText = 'AV {0}, Defender {1}, Firewall {2}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.Defender.AntivirusSummary -Fallback 'Unknown'), (ConvertTo-WTDisplayValue -Value $Report.Normalized.Defender.DefenderSummary -Fallback 'Unknown'), (ConvertTo-WTDisplayValue -Value $Report.Normalized.Defender.FirewallSummary -Fallback 'Unknown')
         }
     }
+    if ($Report.Normalized.Services) {
+        $servicesText = '{0} failures, {1} agents, {2} auto stopped, {3} critical stopped' -f (Get-WTArrayCountSafe -Value $Report.Normalized.Services.ServiceFailureEvents), (Get-WTArrayCountSafe -Value $Report.Normalized.Services.CorporateAgents), (Get-WTArrayCountSafe -Value $Report.Normalized.Services.AutomaticStoppedServices), (Get-WTArrayCountSafe -Value $Report.Normalized.Services.CriticalWindowsServicesNotRunning)
+    }
     if ($Report.Normalized.Events) {
         if (@($Report.Normalized.Events.LogsUnavailable).Count -ge 2 -and @($Report.Normalized.Events.AllEvents).Count -eq 0) {
             $eventsText = 'Unknown'
@@ -781,6 +788,7 @@ function Write-WTConsoleSummary {
         ('Power: {0}' -f $powerText),
         ('Updates: {0}' -f $updatesText),
         ('Security: {0}' -f $securityText),
+        ('Services: {0}' -f $servicesText),
         ('Events: {0}' -f $eventsText),
         ('Report directory: {0}' -f $Report.Metadata.ReportDirectory),
         ('JSON: {0}' -f $jsonPathText),
@@ -799,7 +807,7 @@ function Write-WTConsoleSummary {
         }
     }
     else {
-        $lineColors = @('Cyan','Gray','White','DarkGray','Gray','Gray','Gray','Gray','Gray','Gray','Gray','Gray','DarkGray','Gray','Gray','DarkGray')
+        $lineColors = @('Cyan','Gray','White','DarkGray','Gray','Gray','Gray','Gray','Gray','Gray','Gray','Gray','Gray','DarkGray','Gray','Gray','DarkGray')
         for ($i = 0; $i -lt $summaryLines.Count; $i++) {
             $color = if ($i -lt $lineColors.Count) { $lineColors[$i] } else { 'Gray' }
             Write-Host $summaryLines[$i] -ForegroundColor $color
@@ -1151,6 +1159,97 @@ function Export-WTMarkdownReport {
     }
     else {
         [void]$sb.AppendLine('No security/Defender data available.')
+        [void]$sb.AppendLine('')
+    }
+    [void]$sb.AppendLine('## Services / Agents Overview')
+    [void]$sb.AppendLine('')
+    $services = $Report.Normalized.Services
+    if ($services) {
+        [void]$sb.AppendLine(('* Total services collected: {0}' -f (ConvertTo-WTDisplayValue -Value $services.TotalServicesCollected -Fallback '0')))
+        [void]$sb.AppendLine(('* Automatic stopped services: {0}' -f (Get-WTArrayCountSafe -Value $services.AutomaticStoppedServices)))
+        [void]$sb.AppendLine(('* Critical Windows services not running: {0}' -f (Get-WTArrayCountSafe -Value $services.CriticalWindowsServicesNotRunning)))
+        [void]$sb.AppendLine(('* Corporate agents detected: {0}' -f (Get-WTArrayCountSafe -Value $services.CorporateAgents)))
+        [void]$sb.AppendLine(('* Remote access tools detected: {0}' -f (Get-WTArrayCountSafe -Value $services.RemoteAccessToolsDetected)))
+        [void]$sb.AppendLine(('* Recent service failures: {0}' -f (Get-WTArrayCountSafe -Value $services.ServiceFailureEvents)))
+        [void]$sb.AppendLine(('* Recent service installs: {0}' -f (Get-WTArrayCountSafe -Value $services.ServiceInstallEvents)))
+        [void]$sb.AppendLine(('* Start type changes: {0}' -f (Get-WTArrayCountSafe -Value $services.ServiceStartTypeChangeEvents)))
+        [void]$sb.AppendLine(('* Services health summary: {0}' -f (ConvertTo-WTMarkdownCell -Value $services.ServicesHealthSummary)))
+        [void]$sb.AppendLine(('* Corporate agents summary: {0}' -f (ConvertTo-WTMarkdownCell -Value $services.CorporateAgentsSummary)))
+        [void]$sb.AppendLine(('* Remote access summary: {0}' -f (ConvertTo-WTMarkdownCell -Value $services.RemoteAccessSummary)))
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Corporate Agents')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| Agent | Category | Status | Services | Processes | RecentFailures |')
+        [void]$sb.AppendLine('| --- | --- | --- | --- | --- | ---: |')
+        $agentRows = @($services.CorporateAgents | Select-Object -First 15)
+        if ($agentRows.Count -eq 0) {
+            [void]$sb.AppendLine('| Unknown | Unknown | Unknown | Unknown | Unknown | 0 |')
+        }
+        else {
+            foreach ($agent in $agentRows) {
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} |' -f (ConvertTo-WTMarkdownCell -Value $agent.AgentName), (ConvertTo-WTMarkdownCell -Value $agent.Category), (ConvertTo-WTMarkdownCell -Value $agent.StatusSummary), (ConvertTo-WTMarkdownCell -Value ($agent.Services -join '; ')), (ConvertTo-WTMarkdownCell -Value ($agent.Processes -join '; ')), (ConvertTo-WTMarkdownCell -Value $agent.RecentFailureCount))))
+            }
+        }
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Recent Service Failures')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| TimeCreated | Id | Service | MessageShort |')
+        [void]$sb.AppendLine('| --- | ---: | --- | --- |')
+        $svcFailureRows = @($services.ServiceFailureEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 10)
+        if ($svcFailureRows.Count -eq 0) {
+            [void]$sb.AppendLine('No recent service failures found.')
+        }
+        else {
+            foreach ($evt in $svcFailureRows) {
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'), (ConvertTo-WTMarkdownCell -Value $evt.Id), (ConvertTo-WTMarkdownCell -Value $evt.ServiceName), (ConvertTo-WTMarkdownCell -Value $evt.MessageShort))))
+            }
+        }
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Recently Installed Services')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| TimeCreated | Service | Path | Account |')
+        [void]$sb.AppendLine('| --- | --- | --- | --- |')
+        $svcInstallRows = @($services.RecentlyInstalledServices | Sort-Object -Property TimeCreated -Descending | Select-Object -First 10)
+        if ($svcInstallRows.Count -eq 0) {
+            [void]$sb.AppendLine('No recent service installations found.')
+        }
+        else {
+            foreach ($evt in $svcInstallRows) {
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'), (ConvertTo-WTMarkdownCell -Value $evt.ServiceName), (ConvertTo-WTMarkdownCell -Value $evt.ServiceFileName), (ConvertTo-WTMarkdownCell -Value $evt.ServiceAccount))))
+            }
+        }
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Automatic Services Stopped')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| Service | DisplayName | StartMode | State | Path |')
+        [void]$sb.AppendLine('| --- | --- | --- | --- | --- |')
+        $autoStoppedRows = @($services.AutomaticStoppedServices | Select-Object -First 15)
+        if ($autoStoppedRows.Count -eq 0) {
+            [void]$sb.AppendLine('| Unknown | Unknown | Unknown | Unknown | Unknown |')
+        }
+        else {
+            foreach ($svc in $autoStoppedRows) {
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} |' -f (ConvertTo-WTMarkdownCell -Value $svc.Name), (ConvertTo-WTMarkdownCell -Value $svc.DisplayName), (ConvertTo-WTMarkdownCell -Value $svc.StartMode), (ConvertTo-WTMarkdownCell -Value $svc.State), (ConvertTo-WTMarkdownCell -Value $svc.PathName))))
+            }
+        }
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Crashing Service Candidates')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| Process | Service | DisplayName | CrashCount | LastCrash |')
+        [void]$sb.AppendLine('| --- | --- | --- | ---: | --- |')
+        $crashCandidateRows = @($services.CrashingServiceCandidates | Select-Object -First 10)
+        if ($crashCandidateRows.Count -eq 0) {
+            [void]$sb.AppendLine('No crashing service candidates identified.')
+        }
+        else {
+            foreach ($row in $crashCandidateRows) {
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} |' -f (ConvertTo-WTMarkdownCell -Value $row.Process), (ConvertTo-WTMarkdownCell -Value $row.Service), (ConvertTo-WTMarkdownCell -Value $row.DisplayName), (ConvertTo-WTMarkdownCell -Value $row.CrashCount), (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $row.LastCrash) -Fallback 'Unknown'))))
+            }
+        }
+        [void]$sb.AppendLine('')
+    }
+    else {
+        [void]$sb.AppendLine('No services/agents data available.')
         [void]$sb.AppendLine('')
     }
     [void]$sb.AppendLine('## Disk Overview')
@@ -2946,6 +3045,769 @@ function Invoke-WTDefenderRules {
         [void](Add-WTFinding -Report $Report -Id 'WT-SEC-FIREWALL-ENABLED' -Category 'Security' -Severity 'Info' -Title 'Firewall profiles enabled' -Description 'All detected firewall profiles are enabled.' -Evidence @(
             ('FirewallSummary={0}' -f $defender.FirewallSummary)
         ) -Recommendation 'No action required.' -Source 'Invoke-WTDefenderRules' -Status 'Pass')
+    }
+}
+
+function Get-WTServicesCollectionLimit {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Mode = 'Standard'
+    )
+
+    switch ($Mode) {
+        'Quick' { return 100 }
+        'Full' { return 1000 }
+        default { return 250 }
+    }
+}
+
+function Get-WTTextAfterPrefix {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Prefixes,
+
+        [switch]$CutAtComma
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    foreach ($line in @($Text -split "`r?`n")) {
+        $trimmed = if ($line) { $line.TrimStart() } else { '' }
+        foreach ($prefix in $Prefixes) {
+            if ($trimmed.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $value = $trimmed.Substring($prefix.Length).Trim()
+                if ($CutAtComma -and $value) {
+                    $commaIndex = $value.IndexOf(',')
+                    if ($commaIndex -ge 0) {
+                        $value = $value.Substring(0, $commaIndex).Trim()
+                    }
+                }
+                if (-not [string]::IsNullOrWhiteSpace($value)) {
+                    return $value
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
+function Get-WTServiceEventDetails {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Event
+    )
+
+    $text = @($Event.Message, $Event.MessageShort) -join "`n"
+    $serviceName = Get-WTTextAfterPrefix -Text $text -Prefixes @('Service Name:', 'Nombre del servicio:') -CutAtComma
+    $serviceFileName = Get-WTTextAfterPrefix -Text $text -Prefixes @('File Name:', 'Nombre de archivo:', 'Image Path:', 'Ruta de archivo:', 'Ruta de la imagen:', 'Service File Name:')
+    $serviceAccount = Get-WTTextAfterPrefix -Text $text -Prefixes @('Account Name:', 'Nombre de cuenta:', 'Service Account:') -CutAtComma
+    $startType = Get-WTTextAfterPrefix -Text $text -Prefixes @('Start Type:', 'Tipo de inicio:', 'StartType:') -CutAtComma
+    $recoveryAction = Get-WTTextAfterPrefix -Text $text -Prefixes @('Recovery Action:', 'Acción de recuperación:') -CutAtComma
+
+    if ([string]::IsNullOrWhiteSpace($serviceName)) {
+        $fallbackPatterns = @(
+            '(?im)^\s*(?:The|El)\s+(?<name>.+?)\s+service\s+(?:terminated unexpectedly|was changed|failed to start|entered the .*? state|has stopped|se cerró inesperadamente|se cambió|se detuvo).*?$',
+            '(?im)^\s*(?<name>.+?)\s+service\s+(?:terminated unexpectedly|failed to start|has stopped).*?$'
+        )
+        foreach ($pattern in $fallbackPatterns) {
+            if ($text -match $pattern) {
+                $serviceName = $matches.name.Trim()
+                break
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($serviceFileName)) {
+        $pathPatterns = @(
+            '(?im)^\s*(?:Path Name|Ruta de archivo|Ruta de la imagen|Image Path|File Name)\s*:\s*(?<path>.+?)\s*$',
+            '(?im)^\s*(?:Service File Name)\s*:\s*(?<path>.+?)\s*$'
+        )
+        foreach ($pattern in $pathPatterns) {
+            if ($text -match $pattern) {
+                $serviceFileName = $matches.path.Trim()
+                break
+            }
+        }
+    }
+
+    $serviceEventType = 'Failure'
+    switch ($Event.Id) {
+        7045 { $serviceEventType = 'Install' }
+        7040 { $serviceEventType = 'StartTypeChange' }
+        7032 { $serviceEventType = 'RecoveryAction' }
+    }
+
+    return [pscustomobject]@{
+        ServiceName        = $serviceName
+        ServiceFileName    = $serviceFileName
+        ServiceAccount     = $serviceAccount
+        StartTypeFromEvent = $startType
+        RecoveryAction     = $recoveryAction
+        ServiceEventType   = $serviceEventType
+    }
+}
+
+function Get-WTServiceAgentClassification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Service
+    )
+
+    $text = @($Service.Name, $Service.DisplayName, $Service.PathName, $Service.Description) -join "`n"
+    $catalog = @(
+        [pscustomobject]@{ AgentName = 'Sophos'; Vendor = 'Sophos'; Category = 'EDR/AV'; IsRemoteAccess = $false; Notes = 'Sophos security services'; Patterns = @('(?i)Sophos', '(?i)SEDService', '(?i)SSPService', '(?i)Sophos Endpoint Defense', '(?i)Sophos File Scanner', '(?i)Sophos MCS', '(?i)Sophos AutoUpdate', '(?i)Sophos Health') },
+        [pscustomobject]@{ AgentName = 'Action1'; Vendor = 'Action1'; Category = 'RMM/Patching'; IsRemoteAccess = $false; Notes = 'Action1 remote management agent'; Patterns = @('(?i)action1_agent', '(?i)Action1') },
+        [pscustomobject]@{ AgentName = 'Mesh Agent'; Vendor = 'MeshCentral'; Category = 'RMM/Patching'; IsRemoteAccess = $false; Notes = 'MeshCentral agent'; Patterns = @('(?i)\bMesh Agent\b', '(?i)meshagent') },
+        [pscustomobject]@{ AgentName = 'PH Mesh Cloud Agent'; Vendor = 'PH Mesh'; Category = 'RMM/Patching'; IsRemoteAccess = $false; Notes = 'PH Mesh Cloud Agent'; Patterns = @('(?i)PH Mesh Cloud Agent', '(?i)phmeshcloudagent') },
+        [pscustomobject]@{ AgentName = 'NComputing / vSpace'; Vendor = 'NComputing'; Category = 'Virtualization/ThinClient'; IsRemoteAccess = $false; Notes = 'NComputing or vSpace components'; Patterns = @('(?i)NComputing', '(?i)\bvSpace\b', '(?i)mxdhcp') },
+        [pscustomobject]@{ AgentName = 'PDF24'; Vendor = 'PDF24'; Category = 'Printing/PDF'; IsRemoteAccess = $false; Notes = 'PDF24 print/PDF components'; Patterns = @('(?i)PDF24') },
+        [pscustomobject]@{ AgentName = 'IDrive'; Vendor = 'IDrive'; Category = 'Backup'; IsRemoteAccess = $false; Notes = 'IDrive backup agent'; Patterns = @('(?i)\bIDrive\b', '(?i)id_tray', '(?i)id_service', '(?i)idrive') },
+        [pscustomobject]@{ AgentName = 'AnyDesk'; Vendor = 'AnyDesk'; Category = 'RemoteAccess'; IsRemoteAccess = $true; Notes = 'Remote access tool'; Patterns = @('(?i)AnyDesk') },
+        [pscustomobject]@{ AgentName = 'TeamViewer'; Vendor = 'TeamViewer'; Category = 'RemoteAccess'; IsRemoteAccess = $true; Notes = 'Remote access tool'; Patterns = @('(?i)TeamViewer') },
+        [pscustomobject]@{ AgentName = 'RustDesk'; Vendor = 'RustDesk'; Category = 'RemoteAccess'; IsRemoteAccess = $true; Notes = 'Remote access tool'; Patterns = @('(?i)RustDesk') },
+        [pscustomobject]@{ AgentName = 'Chrome Remote Desktop'; Vendor = 'Google'; Category = 'RemoteAccess'; IsRemoteAccess = $true; Notes = 'Remote access tool'; Patterns = @('(?i)Chrome Remote Desktop', '(?i)remoting_host') },
+        [pscustomobject]@{ AgentName = 'Splashtop'; Vendor = 'Splashtop'; Category = 'RemoteAccess'; IsRemoteAccess = $true; Notes = 'Remote access tool'; Patterns = @('(?i)Splashtop') },
+        [pscustomobject]@{ AgentName = 'UltraVNC'; Vendor = 'UltraVNC'; Category = 'RemoteAccess'; IsRemoteAccess = $true; Notes = 'Remote access tool'; Patterns = @('(?i)UltraVNC') },
+        [pscustomobject]@{ AgentName = 'TightVNC'; Vendor = 'TightVNC'; Category = 'RemoteAccess'; IsRemoteAccess = $true; Notes = 'Remote access tool'; Patterns = @('(?i)TightVNC') },
+        [pscustomobject]@{ AgentName = 'RealVNC'; Vendor = 'RealVNC'; Category = 'RemoteAccess'; IsRemoteAccess = $true; Notes = 'Remote access tool'; Patterns = @('(?i)RealVNC') }
+    )
+
+    foreach ($entry in $catalog) {
+        foreach ($pattern in $entry.Patterns) {
+            if ($text -match $pattern) {
+                return [pscustomobject]@{
+                    AgentName      = $entry.AgentName
+                    Vendor         = $entry.Vendor
+                    Category       = $entry.Category
+                    IsRemoteAccess = $entry.IsRemoteAccess
+                    Notes          = $entry.Notes
+                    MatchText      = $pattern
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
+function Get-WTServicesInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report,
+
+        [ValidateRange(1, 90)]
+        [int]$Days = 7,
+
+        [AllowNull()]
+        [string]$Mode = 'Standard'
+    )
+
+    $windowEnd = Get-Date
+    $windowStart = $windowEnd.AddDays(-1 * [math]::Abs($Days))
+    $limit = Get-WTServicesCollectionLimit -Mode $Mode
+    $logsUnavailable = @()
+    $serviceIndex = @{}
+
+    $cimServices = @()
+    $serviceList = @()
+    try { $cimServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop) } catch { [void](Add-WTExecutionWarning -Report $Report -Scope 'Services' -Message ('Get-CimInstance Win32_Service failed: {0}' -f $_.Exception.Message)) }
+    try { $serviceList = @(Get-Service -ErrorAction Stop) } catch { [void](Add-WTExecutionWarning -Report $Report -Scope 'Services' -Message ('Get-Service failed: {0}' -f $_.Exception.Message)) }
+
+    foreach ($svc in $cimServices) {
+        if (-not $svc -or [string]::IsNullOrWhiteSpace($svc.Name)) { continue }
+        $inventoryItem = [pscustomobject]@{
+            Name                   = $svc.Name
+            DisplayName            = ConvertTo-WTDisplayValue -Value $svc.DisplayName -Fallback $svc.Name
+            State                  = ConvertTo-WTDisplayValue -Value $svc.State -Fallback 'Unknown'
+            Status                 = ConvertTo-WTDisplayValue -Value $svc.Status -Fallback 'Unknown'
+            StartMode              = ConvertTo-WTDisplayValue -Value $svc.StartMode -Fallback 'Unknown'
+            StartName              = ConvertTo-WTDisplayValue -Value $svc.StartName -Fallback 'Unknown'
+            PathName               = ConvertTo-WTDisplayValue -Value $svc.PathName -Fallback 'Unknown'
+            ProcessId              = $svc.ProcessId
+            ServiceType            = ConvertTo-WTDisplayValue -Value $svc.ServiceType -Fallback 'Unknown'
+            Description            = ConvertTo-WTDisplayValue -Value $svc.Description -Fallback 'Unknown'
+            ExitCode               = $svc.ExitCode
+            ServiceSpecificExitCode = $svc.ServiceSpecificExitCode
+            Started                = $svc.Started
+            AcceptStop             = $svc.AcceptStop
+            Exists                 = $true
+            Source                 = 'CIM'
+            AgentName              = $null
+            Vendor                 = $null
+            Category               = $null
+            IsRemoteAccess         = $false
+            AgentNotes             = $null
+        }
+        $classification = Get-WTServiceAgentClassification -Service $inventoryItem
+        if ($classification) {
+            $inventoryItem.AgentName = $classification.AgentName
+            $inventoryItem.Vendor = $classification.Vendor
+            $inventoryItem.Category = $classification.Category
+            $inventoryItem.IsRemoteAccess = $classification.IsRemoteAccess
+            $inventoryItem.AgentNotes = $classification.Notes
+        }
+        $serviceIndex[$inventoryItem.Name.ToLowerInvariant()] = $inventoryItem
+    }
+
+    foreach ($svc in $serviceList) {
+        if (-not $svc -or [string]::IsNullOrWhiteSpace($svc.Name)) { continue }
+        $key = $svc.Name.ToLowerInvariant()
+        if ($serviceIndex.ContainsKey($key)) {
+            $existing = $serviceIndex[$key]
+            if (($existing.DisplayName -eq $existing.Name -or $existing.DisplayName -eq 'Unknown') -and $svc.DisplayName) { $existing.DisplayName = $svc.DisplayName }
+            if ($existing.Status -eq 'Unknown') { $existing.Status = [string]$svc.Status }
+            if ($existing.State -eq 'Unknown') { $existing.State = [string]$svc.Status }
+            if ($null -eq $existing.AcceptStop) { try { $existing.AcceptStop = [bool]$svc.CanStop } catch { } }
+            if ($existing.Source -notmatch 'Get-Service') { $existing.Source = '{0}/Get-Service' -f $existing.Source }
+            continue
+        }
+        $inventoryItem = [pscustomobject]@{
+            Name                   = $svc.Name
+            DisplayName            = ConvertTo-WTDisplayValue -Value $svc.DisplayName -Fallback $svc.Name
+            State                  = ConvertTo-WTDisplayValue -Value $svc.Status -Fallback 'Unknown'
+            Status                 = ConvertTo-WTDisplayValue -Value $svc.Status -Fallback 'Unknown'
+            StartMode              = 'Unknown'
+            StartName              = 'Unknown'
+            PathName               = 'Unknown'
+            ProcessId              = $null
+            ServiceType            = 'Unknown'
+            Description            = 'Unknown'
+            ExitCode               = $null
+            ServiceSpecificExitCode = $null
+            Started                = $null
+            AcceptStop             = $null
+            Exists                 = $true
+            Source                 = 'Get-Service'
+            AgentName              = $null
+            Vendor                 = $null
+            Category               = $null
+            IsRemoteAccess         = $false
+            AgentNotes             = $null
+        }
+        $classification = Get-WTServiceAgentClassification -Service $inventoryItem
+        if ($classification) {
+            $inventoryItem.AgentName = $classification.AgentName
+            $inventoryItem.Vendor = $classification.Vendor
+            $inventoryItem.Category = $classification.Category
+            $inventoryItem.IsRemoteAccess = $classification.IsRemoteAccess
+            $inventoryItem.AgentNotes = $classification.Notes
+        }
+        $serviceIndex[$inventoryItem.Name.ToLowerInvariant()] = $inventoryItem
+    }
+
+    $serviceCandidates = @($serviceIndex.Values | Sort-Object -Property @{ Expression = { if ($_.AgentName) { 100 } elseif ($_.StartMode -match '(?i)auto') { 50 } else { 10 } }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true } | Select-Object -First $limit)
+
+    $criticalWindowsServiceNames = @('EventLog', 'RpcSs', 'Winmgmt', 'LanmanWorkstation', 'LanmanServer', 'Netlogon', 'Dnscache', 'Dhcp', 'W32Time', 'Schedule', 'Spooler', 'TermService', 'ProfSvc', 'gpsvc', 'mpssvc', 'wuauserv', 'bits', 'cryptsvc')
+    $criticalWindowsServices = @()
+    foreach ($name in $criticalWindowsServiceNames) {
+        $item = $serviceIndex[$name.ToLowerInvariant()]
+        if (-not $item) {
+            try { $item = Get-WTServiceSnapshot -Name $name } catch { $item = $null }
+        }
+        if ($item) { $criticalWindowsServices += $item }
+    }
+
+    $serviceEventIds = @(7000, 7001, 7009, 7011, 7022, 7023, 7024, 7031, 7032, 7034, 7040, 7045)
+    $serviceEventSource = @()
+    if ($Report.Raw.Events -and $Report.Raw.Events.SystemEvents) {
+        $serviceEventSource = @($Report.Raw.Events.SystemEvents | Where-Object { $_.ProviderName -eq 'Service Control Manager' -and $_.Id -in $serviceEventIds })
+    }
+    if ($serviceEventSource.Count -eq 0) {
+        try {
+            $serviceEventSource = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $windowStart; Id = $serviceEventIds } -MaxEvents ($limit + 1) -ErrorAction Stop)
+            $serviceEventSource = @($serviceEventSource | ForEach-Object { ConvertTo-WTEventRecord -EventRecord $_ })
+        }
+        catch {
+            $reason = $_.Exception.Message
+            if ($reason -match '(?i)(no matching events|no se encontraron eventos|no events were found|no events match|no hay eventos)') {
+                $serviceEventSource = @()
+            }
+            else {
+                $logsUnavailable += [pscustomobject]@{ LogName = 'System'; Reason = 'Unable to read service control manager events.' }
+                [void](Add-WTExecutionWarning -Report $Report -Scope 'Services' -Message ('Event collection failed for System service control manager events: {0}' -f $reason))
+            }
+        }
+    }
+
+    $serviceEvents = @()
+    $serviceFailureEvents = @()
+    $serviceInstallEvents = @()
+    $serviceStartTypeChangeEvents = @()
+    $serviceSeenKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($evt in @($serviceEventSource | Sort-Object -Property TimeCreated -Descending)) {
+        if (-not $evt) { continue }
+        $key = Get-WTEventKey -Event $evt
+        if ($key -and -not $serviceSeenKeys.Add($key)) { continue }
+        $details = Get-WTServiceEventDetails -Event $evt
+        $serviceEvent = [pscustomobject]@{
+            TimeCreated        = $evt.TimeCreated
+            LogName            = $evt.LogName
+            ProviderName       = $evt.ProviderName
+            Id                 = $evt.Id
+            Level              = $evt.Level
+            LevelDisplayName   = $evt.LevelDisplayName
+            Message            = $evt.Message
+            MessageShort       = $evt.MessageShort
+            MachineName        = $evt.MachineName
+            ServiceName        = $details.ServiceName
+            ServiceFileName    = $details.ServiceFileName
+            ServiceAccount     = $details.ServiceAccount
+            StartTypeFromEvent = $details.StartTypeFromEvent
+            RecoveryAction     = $details.RecoveryAction
+            ServiceEventType   = $details.ServiceEventType
+        }
+        $serviceEvents += $serviceEvent
+        switch ($details.ServiceEventType) {
+            'Install' { $serviceInstallEvents += $serviceEvent }
+            'StartTypeChange' { $serviceStartTypeChangeEvents += $serviceEvent }
+            default { $serviceFailureEvents += $serviceEvent }
+        }
+        if ($serviceEvents.Count -ge $limit) { break }
+    }
+
+    $processes = @()
+    $processNames = New-Object 'System.Collections.Generic.HashSet[string]'
+    $agentRegex = '(?i)Sophos|Intercept X|action1|Mesh Agent|PH Mesh Cloud Agent|NComputing|vSpace|mxdhcp|PDF24|IDrive|AnyDesk|TeamViewer|RustDesk|Chrome Remote Desktop|Splashtop|UltraVNC|TightVNC|RealVNC'
+    $crashNames = @()
+    if ($Report.Normalized.Events -and $Report.Normalized.Events.ApplicationCrashSummaryByProcess) {
+        $crashNames = @($Report.Normalized.Events.ApplicationCrashSummaryByProcess | Select-Object -ExpandProperty ProcessName | Where-Object { $_ -and $_ -ne 'Unknown' })
+    }
+    try {
+        foreach ($proc in @(Get-Process -ErrorAction Stop)) {
+            if ($proc.ProcessName -notmatch $agentRegex -and ($crashNames.Count -eq 0 -or ($crashNames -notcontains $proc.ProcessName -and $crashNames -notcontains ([System.IO.Path]::GetFileNameWithoutExtension($proc.ProcessName))))) {
+                continue
+            }
+            if ($processNames.Add($proc.ProcessName.ToLowerInvariant())) {
+                $processPath = $null
+                $startTime = $null
+                try { $processPath = $proc.Path } catch { $processPath = $null }
+                try { $startTime = $proc.StartTime } catch { $startTime = $null }
+                $processes += [pscustomobject]@{
+                    ProcessName  = $proc.ProcessName
+                    Id           = $proc.Id
+                    Path         = $processPath
+                    CPU          = $proc.CPU
+                    WorkingSetMB = [math]::Round(($proc.WorkingSet64 / 1MB), 2)
+                    StartTime    = $startTime
+                }
+            }
+        }
+    }
+    catch {
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Services' -Message ('Get-Process scan failed: {0}' -f $_.Exception.Message))
+    }
+
+    return [pscustomobject]@{
+        WindowStart              = $windowStart
+        WindowEnd                = $windowEnd
+        Days                     = $Days
+        Mode                     = $Mode
+        TotalServicesCollected   = @($serviceCandidates).Count
+        Services                 = @($serviceCandidates)
+        CriticalWindowsServices  = @($criticalWindowsServices)
+        ServiceEvents            = @($serviceEvents)
+        ServiceFailureEvents     = @($serviceFailureEvents)
+        ServiceInstallEvents     = @($serviceInstallEvents)
+        ServiceStartTypeChangeEvents = @($serviceStartTypeChangeEvents)
+        CandidateProcesses       = @($processes)
+        LogsUnavailable          = @($logsUnavailable)
+    }
+}
+
+function ConvertTo-WTNormalizedServicesInfo {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$ServiceInfo
+    )
+
+    if (-not $ServiceInfo) {
+        return [pscustomobject]@{
+            TotalServicesCollected = 0
+            AutomaticServices = @()
+            AutomaticStoppedServices = @()
+            CriticalWindowsServices = @()
+            CriticalWindowsServicesNotRunning = @()
+            CorporateAgents = @()
+            CorporateAgentsRunning = @()
+            CorporateAgentsStopped = @()
+            RemoteAccessToolsDetected = @()
+            RecentlyInstalledServices = @()
+            ServiceInstallEvents = @()
+            ServiceFailureEvents = @()
+            ServiceStartTypeChangeEvents = @()
+            ServiceFailureSummaryByService = @()
+            ServiceInstallSummaryByService = @()
+            CrashingServiceCandidates = @()
+            ProcessCrashWithoutServiceMatch = @()
+            DuplicateOrLegacyAgentCandidates = @()
+            ServicesHealthSummary = 'Service inventory partial or unavailable'
+            CorporateAgentsSummary = 'No known corporate agents detected'
+            RemoteAccessSummary = 'No remote access tools detected'
+            LogsUnavailable = @()
+        }
+    }
+
+    $services = @($ServiceInfo.Services | Where-Object { $_ })
+    $serviceEvents = @($ServiceInfo.ServiceEvents | Where-Object { $_ })
+    $serviceFailureEvents = @($ServiceInfo.ServiceFailureEvents | Where-Object { $_ })
+    $serviceInstallEvents = @($ServiceInfo.ServiceInstallEvents | Where-Object { $_ })
+    $serviceStartTypeChangeEvents = @($ServiceInfo.ServiceStartTypeChangeEvents | Where-Object { $_ })
+
+    $automaticServices = @($services | Where-Object { $_.StartMode -match '(?i)auto' })
+    $automaticStoppedServices = @($automaticServices | Where-Object { $_.State -notin @('Running', 'Unknown') -and $_.Name -notin @('TrustedInstaller', 'WaaSMedicSvc') -and $_.StartMode -notmatch '(?i)manual' })
+    $criticalWindowsServices = @($ServiceInfo.CriticalWindowsServices | Where-Object { $_ })
+    $criticalNotRunning = @()
+    $domainJoined = $false
+    if ($Report.Context) { $domainJoined = [bool]$Report.Context.IsDomainJoined }
+    foreach ($svc in $criticalWindowsServices) {
+        if (-not $svc) { continue }
+        $isStopped = $svc.State -notin @('Running', 'Unknown')
+        $ignore = $false
+        switch ($svc.Name) {
+            'Netlogon' { if (-not $domainJoined) { $ignore = $true } }
+            'wuauserv' { if ($svc.StartMode -match '(?i)Manual') { $ignore = $true } }
+            'bits' { if ($svc.StartMode -match '(?i)Manual') { $ignore = $true } }
+            'Spooler' {
+                if ($svc.StartMode -match '(?i)Manual' -and -not ($serviceEvents | Where-Object { $_.MessageShort -match '(?i)PDF24|spool|printer' })) {
+                    $ignore = $true
+                }
+            }
+            'TermService' { if ($svc.StartMode -match '(?i)Manual') { $ignore = $true } }
+        }
+        if ($isStopped -and -not $ignore) {
+            $criticalNotRunning += $svc
+        }
+    }
+
+    $agentGroups = @{}
+    foreach ($svc in $services) {
+        if (-not $svc.AgentName) { continue }
+        if (-not $agentGroups.ContainsKey($svc.AgentName)) {
+            $agentGroups[$svc.AgentName] = [ordered]@{
+                AgentName = $svc.AgentName
+                Vendor = $svc.Vendor
+                Category = $svc.Category
+                Detected = $true
+                Services = New-Object System.Collections.Generic.List[string]
+                Processes = New-Object System.Collections.Generic.List[string]
+                StatusSummary = 'Detected'
+                RunningServiceCount = 0
+                StoppedServiceCount = 0
+                RecentFailureCount = 0
+                RecentInstallCount = 0
+                Notes = $svc.AgentNotes
+            }
+        }
+        $group = $agentGroups[$svc.AgentName]
+        [void]$group.Services.Add($svc.Name)
+        if ($svc.State -eq 'Running') { $group.RunningServiceCount++ } elseif ($svc.State -notin @('Running', 'Unknown')) { $group.StoppedServiceCount++ }
+    }
+
+    foreach ($proc in @($ServiceInfo.CandidateProcesses)) {
+        if (-not $proc) { continue }
+        foreach ($group in $agentGroups.Values) {
+            foreach ($svcName in @($group.Services)) {
+                if ($proc.ProcessName -match '(?i)^' + [regex]::Escape($svcName) + '$' -or ($proc.Path -and $proc.Path -match [regex]::Escape($svcName))) {
+                    [void]$group.Processes.Add($proc.ProcessName)
+                }
+            }
+        }
+    }
+
+    $serviceFailureSummaryByService = @(
+        $serviceFailureEvents |
+            Group-Object -Property ServiceName |
+            Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true } |
+            ForEach-Object {
+                $groupEvents = @($_.Group | Sort-Object -Property TimeCreated)
+                [pscustomobject]@{
+                    ServiceName = if ([string]::IsNullOrWhiteSpace($_.Name)) { 'Unknown' } else { $_.Name }
+                    Count = $_.Count
+                    LastEvent = $groupEvents[-1].TimeCreated
+                    ExampleMessageShort = $groupEvents[0].MessageShort
+                }
+            }
+    )
+    $serviceInstallSummaryByService = @(
+        $serviceInstallEvents |
+            Group-Object -Property ServiceName |
+            Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true } |
+            ForEach-Object {
+                $groupEvents = @($_.Group | Sort-Object -Property TimeCreated)
+                [pscustomobject]@{
+                    ServiceName = if ([string]::IsNullOrWhiteSpace($_.Name)) { 'Unknown' } else { $_.Name }
+                    Count = $_.Count
+                    LastEvent = $groupEvents[-1].TimeCreated
+                    ExampleMessageShort = $groupEvents[0].MessageShort
+                }
+            }
+    )
+
+    $recentlyInstalledServices = @($serviceInstallEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 10)
+    $crashingServiceCandidates = @()
+    $processCrashWithoutServiceMatch = @()
+    foreach ($crash in @($Report.Normalized.Events.ApplicationCrashSummaryByProcess)) {
+        if (-not $crash -or [string]::IsNullOrWhiteSpace($crash.ProcessName) -or $crash.ProcessName -eq 'Unknown') { continue }
+        $matchedServices = @()
+        foreach ($svc in $services) {
+            if (-not $svc) { continue }
+            if ($svc.Name -and ($svc.Name -ieq $crash.ProcessName -or ($svc.Name -replace '\.exe$','' -ieq ($crash.ProcessName -replace '\.exe$','')))) {
+                $matchedServices += $svc
+                continue
+            }
+            if ($svc.PathName -and $svc.PathName -match [regex]::Escape($crash.ProcessName)) {
+                $matchedServices += $svc
+                continue
+            }
+            if ($svc.AgentName -and (@($svc.Name, $svc.DisplayName, $svc.PathName, $svc.Description) -join ' ' -match [regex]::Escape($svc.AgentName))) {
+                $matchedServices += $svc
+            }
+        }
+        $matchedServices = @($matchedServices | Select-Object -Unique)
+        if ($matchedServices.Count -gt 0) {
+            $bestService = $matchedServices[0]
+            $crashingServiceCandidates += [pscustomobject]@{
+                Process = $crash.ProcessName
+                Service = $bestService.Name
+                DisplayName = $bestService.DisplayName
+                CrashCount = $crash.Count
+                LastCrash = $crash.LastEvent
+            }
+            if ($bestService.AgentName -and $agentGroups.ContainsKey($bestService.AgentName)) {
+                [void]$agentGroups[$bestService.AgentName].Processes.Add($crash.ProcessName)
+            }
+        }
+        else {
+            $processCrashWithoutServiceMatch += $crash
+        }
+    }
+
+    $duplicateOrLegacyAgentCandidates = @()
+    if ($agentGroups.ContainsKey('Mesh Agent') -and $agentGroups.ContainsKey('PH Mesh Cloud Agent')) {
+        $duplicateOrLegacyAgentCandidates += [pscustomobject]@{
+            CandidateName = 'Mesh Agent / PH Mesh Cloud Agent coexistence'
+            Services = @(@($agentGroups['Mesh Agent'].Services + $agentGroups['PH Mesh Cloud Agent'].Services) | Select-Object -Unique)
+            Paths = @($services | Where-Object { $_.AgentName -in @('Mesh Agent', 'PH Mesh Cloud Agent') } | Select-Object -ExpandProperty PathName -Unique)
+            Notes = 'Potential migration or legacy coexistence.'
+        }
+    }
+
+    foreach ($group in $agentGroups.Values) {
+        $group.Services = @($group.Services | Select-Object -Unique)
+        $group.Processes = @($group.Processes | Select-Object -Unique)
+        $group.StatusSummary = if ($group.RunningServiceCount -gt 0 -and $group.StoppedServiceCount -gt 0) { 'Partially running' } elseif ($group.RunningServiceCount -gt 0) { 'Running' } elseif ($group.StoppedServiceCount -gt 0) { 'Stopped' } else { 'Detected' }
+        $group.RecentFailureCount = @($serviceFailureSummaryByService | Where-Object { $_.ServiceName -in $group.Services }).Count
+        $group.RecentInstallCount = @($serviceInstallSummaryByService | Where-Object { $_.ServiceName -in $group.Services }).Count
+    }
+
+    $corporateAgents = @($agentGroups.Values | Where-Object { $_.Category -ne 'RemoteAccess' } | ForEach-Object { [pscustomobject]$_ } | Sort-Object -Property AgentName)
+    $corporateAgentsRunning = @($corporateAgents | Where-Object { $_.RunningServiceCount -gt 0 })
+    $corporateAgentsStopped = @($corporateAgents | Where-Object { $_.StoppedServiceCount -gt 0 -and $_.RunningServiceCount -eq 0 })
+    $remoteAccessToolsDetected = @($agentGroups.Values | Where-Object { $_.Category -eq 'RemoteAccess' } | ForEach-Object { [pscustomobject]$_ } | Sort-Object -Property AgentName)
+
+    $servicesHealthSummary = 'No relevant service issues detected'
+    if ($criticalNotRunning.Count -gt 0) {
+        $servicesHealthSummary = 'Critical Windows services not running'
+    }
+    elseif ($serviceFailureEvents.Count -gt 0) {
+        $servicesHealthSummary = 'Recent service failure events detected'
+    }
+    elseif ($automaticStoppedServices.Count -gt 0) {
+        $servicesHealthSummary = 'Automatic services stopped'
+    }
+    elseif ($services.Count -eq 0) {
+        $servicesHealthSummary = 'Service inventory partial or unavailable'
+    }
+
+    $corporateAgentsSummary = 'No known corporate agents detected'
+    if ($corporateAgents.Count -gt 0) {
+        if ($serviceFailureEvents.Count -gt 0) {
+            $corporateAgentsSummary = 'Corporate agents detected with recent service failures'
+        }
+        else {
+            $corporateAgentsSummary = 'Corporate agents detected'
+        }
+    }
+
+    $remoteAccessSummary = 'No remote access tools detected'
+    if ($remoteAccessToolsDetected.Count -gt 0) {
+        $remoteAccessSummary = 'Remote access tools detected'
+    }
+
+    return [pscustomobject]@{
+        WindowStart              = $ServiceInfo.WindowStart
+        WindowEnd                = $ServiceInfo.WindowEnd
+        Days                     = $ServiceInfo.Days
+        Mode                     = $ServiceInfo.Mode
+        TotalServicesCollected   = @($services).Count
+        AutomaticServices        = @($automaticServices)
+        AutomaticStoppedServices  = @($automaticStoppedServices)
+        CriticalWindowsServices  = @($criticalWindowsServices)
+        CriticalWindowsServicesNotRunning = @($criticalNotRunning)
+        CorporateAgents          = @($corporateAgents)
+        CorporateAgentsRunning   = @($corporateAgentsRunning)
+        CorporateAgentsStopped   = @($corporateAgentsStopped)
+        RemoteAccessToolsDetected = @($remoteAccessToolsDetected)
+        RecentlyInstalledServices = @($recentlyInstalledServices)
+        ServiceInstallEvents     = @($serviceInstallEvents)
+        ServiceFailureEvents     = @($serviceFailureEvents)
+        ServiceStartTypeChangeEvents = @($serviceStartTypeChangeEvents)
+        ServiceFailureSummaryByService = @($serviceFailureSummaryByService)
+        ServiceInstallSummaryByService = @($serviceInstallSummaryByService)
+        CrashingServiceCandidates = @($crashingServiceCandidates)
+        ProcessCrashWithoutServiceMatch = @($processCrashWithoutServiceMatch)
+        DuplicateOrLegacyAgentCandidates = @($duplicateOrLegacyAgentCandidates)
+        ServicesHealthSummary    = $servicesHealthSummary
+        CorporateAgentsSummary   = $corporateAgentsSummary
+        RemoteAccessSummary      = $remoteAccessSummary
+        LogsUnavailable          = @($ServiceInfo.LogsUnavailable)
+        Services                 = @($services)
+    }
+}
+
+function Export-WTServicesCsv {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report,
+
+        [AllowNull()]
+        [psobject]$ServiceInfo
+    )
+
+    $rawDirectory = Join-Path -Path $Report.Metadata.ReportDirectory -ChildPath 'raw'
+    try { [void][System.IO.Directory]::CreateDirectory($rawDirectory) } catch { [void](Add-WTExecutionWarning -Report $Report -Scope 'Services' -Message ('Unable to create raw services output directory: {0}' -f $_.Exception.Message)); return $null }
+
+    $servicesPath = ConvertTo-WTAbsolutePath -Path (Join-Path -Path $rawDirectory -ChildPath 'services.csv')
+    $eventsPath = ConvertTo-WTAbsolutePath -Path (Join-Path -Path $rawDirectory -ChildPath 'events-services.csv')
+
+    $writeCsv = {
+        param([string]$Path, [string]$Header, [object[]]$Rows, [scriptblock]$RowFactory)
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add($Header) | Out-Null
+        foreach ($row in @($Rows)) {
+            if (-not $row) { continue }
+            $cells = & $RowFactory $row
+            $escaped = foreach ($cell in $cells) { if ($null -eq $cell) { '' } else { ('"{0}"' -f (('' + $cell) -replace '"', '""')) } }
+            $lines.Add(($escaped -join ',')) | Out-Null
+        }
+        [System.IO.File]::WriteAllLines($Path, $lines.ToArray(), [System.Text.Encoding]::UTF8)
+    }
+
+    try {
+        & $writeCsv -Path $servicesPath -Header 'Name,DisplayName,State,StartMode,StartName,PathName,ProcessId' -Rows @($ServiceInfo.Services) -RowFactory { param($row) @($row.Name, $row.DisplayName, $row.State, $row.StartMode, $row.StartName, $row.PathName, $row.ProcessId) }
+        & $writeCsv -Path $eventsPath -Header 'TimeCreated,Id,LevelDisplayName,ServiceName,ServiceFileName,ServiceAccount,MessageShort' -Rows @($ServiceInfo.ServiceEvents) -RowFactory { param($row) @((ConvertTo-WTDateTimeString -Value $row.TimeCreated), $row.Id, $row.LevelDisplayName, $row.ServiceName, $row.ServiceFileName, $row.ServiceAccount, $row.MessageShort) }
+    }
+    catch {
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Services' -Message ('Unable to write services CSV export: {0}' -f $_.Exception.Message))
+    }
+
+    $Report.Metadata.ServiceCsvPath = $servicesPath
+    $Report.Metadata.ServiceEventCsvPath = $eventsPath
+
+    return [pscustomobject]@{
+        RawDirectory = $rawDirectory
+        ServicesCsvPath = $servicesPath
+        ServiceEventsCsvPath = $eventsPath
+    }
+}
+
+function Invoke-WTServicesRules {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report
+    )
+
+    $services = $Report.Normalized.Services
+    if (-not $services) { return }
+
+    $failureEvents = @($services.ServiceFailureEvents)
+    $installEvents = @($services.ServiceInstallEvents)
+    $criticalStopped = @($services.CriticalWindowsServicesNotRunning)
+    $agents = @($services.CorporateAgents)
+    $remoteAccess = @($services.RemoteAccessToolsDetected)
+    $autoStopped = @($services.AutomaticStoppedServices)
+    $dupLegacy = @($services.DuplicateOrLegacyAgentCandidates)
+    $crashCandidates = @($services.CrashingServiceCandidates)
+
+    if ($failureEvents.Count -gt 0) {
+        $failureGroups = @($services.ServiceFailureSummaryByService)
+        $topFailureServices = @($failureGroups | Select-Object -First 5 | ForEach-Object { '{0}({1})' -f $_.ServiceName, $_.Count })
+        $latestFailure = @($failureEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        $severity = if ($failureEvents.Count -ge 3 -or $criticalStopped.Count -gt 0 -or $agents.Count -gt 0) { 'Medium' } else { 'Low' }
+        [void](Add-WTFinding -Report $Report -Id 'WT-SVC-FAILURES' -Category 'Services' -Severity $severity -Title 'Recent service failure events detected' -Description 'Windows logged recent Service Control Manager failure events.' -Evidence @(
+            ('Count={0}' -f $failureEvents.Count),
+            ('Services={0}' -f ($topFailureServices -join ', ')),
+            ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestFailure[0].TimeCreated)),
+            ('MessageShort={0}' -f $latestFailure[0].MessageShort)
+        ) -Recommendation 'Review the affected service, recent installs/updates and whether Windows recovery actions restarted it successfully.' -Source 'Invoke-WTServicesRules' -Status 'Warning')
+    }
+
+    if ($installEvents.Count -gt 0) {
+        $latestInstall = @($installEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        $installNames = @($services.ServiceInstallSummaryByService | Select-Object -First 5 | ForEach-Object { $_.ServiceName })
+        [void](Add-WTFinding -Report $Report -Id 'WT-SVC-RECENT-INSTALLS' -Category 'Services' -Severity 'Info' -Title 'Recent service installation events detected' -Description 'Windows logged service installation events during the analysis window.' -Evidence @(
+            ('Count={0}' -f $installEvents.Count),
+            ('Services={0}' -f ($installNames -join ', ')),
+            ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestInstall[0].TimeCreated))
+        ) -Recommendation 'Validate whether recently installed services are expected, especially remote access, security or persistence-capable services.' -Source 'Invoke-WTServicesRules' -Status 'Info')
+    }
+
+    if ($agents.Count -gt 0) {
+        $agentNames = @($agents | Select-Object -First 15 | ForEach-Object { $_.AgentName })
+        $runningCount = @($services.CorporateAgentsRunning).Count
+        $stoppedCount = @($services.CorporateAgentsStopped).Count
+        [void](Add-WTFinding -Report $Report -Id 'WT-SVC-CORPORATE-AGENTS' -Category 'Services' -Severity 'Info' -Title 'Corporate or management agents detected' -Description 'Known security, remote management, patching or support agents were detected.' -Evidence @(
+            ('Agents={0}' -f ($agentNames -join ', ')),
+            ('Running={0}' -f $runningCount),
+            ('Stopped={0}' -f $stoppedCount)
+        ) -Recommendation 'Validate health from each product console if symptoms are reported.' -Source 'Invoke-WTServicesRules' -Status 'Info')
+    }
+
+    if ($dupLegacy.Count -gt 0) {
+        $candidate = $dupLegacy[0]
+        [void](Add-WTFinding -Report $Report -Id 'WT-SVC-DUPLICATE-LEGACY-AGENTS' -Category 'Services' -Severity 'Info' -Title 'Potential duplicate or legacy agents detected' -Description 'Multiple services from similar remote management or agent families were detected and may represent a migration, coexistence or legacy installation.' -Evidence @(
+            ('Candidate={0}' -f $candidate.CandidateName),
+            ('Services={0}' -f (($candidate.Services -join ', '))),
+            ('Paths={0}' -f (($candidate.Paths -join ', ')))
+        ) -Recommendation 'Verify whether both agents are still required before removing anything. WinTriage does not make changes.' -Source 'Invoke-WTServicesRules' -Status 'Info')
+    }
+
+    if ($autoStopped.Count -gt 0) {
+        $autoEvidence = @($autoStopped | Select-Object -First 10 | ForEach-Object { '{0}={1} ({2})' -f $_.Name, $_.State, $_.StartMode })
+        $severity = 'Low'
+        if ($criticalStopped.Count -gt 0) { $severity = 'Medium' }
+        [void](Add-WTFinding -Report $Report -Id 'WT-SVC-AUTO-STOPPED' -Category 'Services' -Severity $severity -Title 'Automatic services stopped' -Description 'One or more automatic services are stopped.' -Evidence $autoEvidence -Recommendation 'Review whether these services are expected to be stopped or if recent changes affected startup.' -Source 'Invoke-WTServicesRules' -Status 'Warning')
+    }
+
+    if ($criticalStopped.Count -gt 0) {
+        $critEvidence = @($criticalStopped | Select-Object -First 10 | ForEach-Object { '{0}={1} ({2})' -f $_.Name, $_.State, $_.StartMode })
+        [void](Add-WTFinding -Report $Report -Id 'WT-SVC-CRITICAL-NOT-RUNNING' -Category 'Services' -Severity 'High' -Title 'Critical Windows services not running' -Description 'One or more critical Windows services are not running.' -Evidence $critEvidence -Recommendation 'Investigate the affected service, dependencies and recent changes. WinTriage does not start or stop services.' -Source 'Invoke-WTServicesRules' -Status 'Warning')
+    }
+
+    if ($crashCandidates.Count -gt 0) {
+        $crashEvidence = @($crashCandidates | Select-Object -First 10 | ForEach-Object { '{0} -> {1} ({2}) count={3}' -f $_.Process, $_.Service, $_.DisplayName, $_.CrashCount })
+        [void](Add-WTFinding -Report $Report -Id 'WT-SVC-CRASHING-SERVICE-CANDIDATE' -Category 'Services' -Severity 'Medium' -Title 'Application crashes may be related to an installed service or agent' -Description 'A crashing process appears related to an installed service, agent or service path.' -Evidence $crashEvidence -Recommendation 'Review the service/application logs, version, recent updates and vendor documentation.' -Source 'Invoke-WTServicesRules' -Status 'Warning')
+    }
+
+    if ($remoteAccess.Count -gt 0) {
+        $remoteNames = @($remoteAccess | Select-Object -First 10 | ForEach-Object { $_.AgentName })
+        [void](Add-WTFinding -Report $Report -Id 'WT-SVC-REMOTE-ACCESS-TOOLS' -Category 'Services' -Severity 'Info' -Title 'Remote access tools detected' -Description 'Remote access or remote support tools were detected.' -Evidence @(
+            ('Tools={0}' -f ($remoteNames -join ', '))
+        ) -Recommendation 'No action required.' -Source 'Invoke-WTServicesRules' -Status 'Info')
     }
 }
 
@@ -5939,16 +6801,24 @@ function Invoke-WinTriage {
             $report.Normalized.Defender = ConvertTo-WTNormalizedDefenderInfo -DefenderInfo $report.Raw.Defender
         } | Out-Null
 
+        $servicesRaw = Invoke-WTSafeCollector -Report $report -Name 'ServicesInfo' -ScriptBlock {
+            Get-WTServicesInfo -Report $report -Days $Days -Mode $mode
+        }
+        if ($servicesRaw) {
+            $report.Raw.Services = $servicesRaw
+        }
+        Invoke-WTSafeStep -Report $report -Name 'NormalizeServices' -ScriptBlock {
+            $report.Normalized.Services = ConvertTo-WTNormalizedServicesInfo -ServiceInfo $report.Raw.Services
+        } | Out-Null
+        Invoke-WTSafeStep -Report $report -Name 'ExportServicesCsv' -ScriptBlock {
+            Export-WTServicesCsv -Report $report -ServiceInfo $report.Raw.Services | Out-Null
+        } | Out-Null
+
         $report.Raw.Domain = [pscustomobject]@{
             IsDomainJoined = $report.Context.IsDomainJoined
             DomainName     = $report.Context.DomainName
         }
         $report.Normalized.Domain = $report.Raw.Domain
-
-        $report.Raw.Services = [pscustomobject]@{
-            Status = 'NotImplemented'
-        }
-        $report.Normalized.Services = $report.Raw.Services
 
         [void](Add-WTFinding -Report $report `
             -Id 'WT-RO-001' `
@@ -5979,6 +6849,9 @@ function Invoke-WinTriage {
         } | Out-Null
         Invoke-WTSafeStep -Report $report -Name 'DefenderRules' -ScriptBlock {
             Invoke-WTDefenderRules -Report $report
+        } | Out-Null
+        Invoke-WTSafeStep -Report $report -Name 'ServicesRules' -ScriptBlock {
+            Invoke-WTServicesRules -Report $report
         } | Out-Null
         Invoke-WTSafeStep -Report $report -Name 'SystemRules' -ScriptBlock {
             Invoke-WTSystemRules -Report $report
