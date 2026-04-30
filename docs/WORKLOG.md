@@ -31,3 +31,7 @@
 - Bumped script version to `0.3.8` after hardening the Spanish `Application Error 1000` parser path and adding parser self-tests.
 - Added a read-only Windows Update, CBS, servicing, Store and Edge/WebView diagnostics module with pending reboot checks, hotfix inventory, servicing WER classification and update-focused report sections.
 - Bumped script version to `0.4.0` after integrating the Windows Update / servicing diagnostics module.
+- Corrected Windows Update pending reboot semantics so `PendingFileRenameOperations` is treated as a generic restart signal instead of a Windows Update reboot requirement.
+- Added explicit `PendingRebootSource`, `GenericRestartSignal`, and pending file rename sampling fields to keep update metadata clean and more actionable.
+- Suppressed accidental pipeline output from the Updates collector and top-level framework findings so `Raw.Updates` and `Normalized.Updates` remain clean objects.
+- Bumped script version to `0.4.1` after fixing pending reboot false positives and report-object contamination.

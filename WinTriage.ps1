@@ -16,7 +16,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.4.0'
+$script:WTVersion = '0.4.1'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -631,9 +631,24 @@ function Write-WTConsoleSummary {
         $powerText = 'Fast Startup {0}, recent shutdowns {1}, unexpected {2}' -f $fastStartupText, $recentShutdownCount, $recentUnexpectedCount
     }
     if ($updates) {
-        $pendingStateText = ConvertTo-WTYesNoUnknown -Value $updates.PendingReboot
+        $updateRebootText = ConvertTo-WTYesNoUnknown -Value $updates.PendingReboot
+        $restartSignalCount = 0
+        $restartSignalKnown = $false
+        if ($updates.PendingReboot -ne $null) {
+            $restartSignalKnown = $true
+            if ($updates.PendingReboot -eq $true) {
+                $restartSignalCount++
+            }
+        }
+        if ($updates.PendingFileRenameOperationsPresent -ne $null) {
+            $restartSignalKnown = $true
+            if ($updates.PendingFileRenameOperationsPresent -eq $true) {
+                $restartSignalCount++
+            }
+        }
+        $restartSignalText = if ($restartSignalKnown) { $restartSignalCount } else { 'Unknown' }
         $servicingIndicatorCount = @($updates.ServicingWerEvents).Count + @($updates.StoreWerEvents).Count + @($updates.EdgeUpdateWerEvents).Count
-        $updatesText = '{0} WU errors, pending reboot {1}, servicing indicators {2}' -f $updates.WindowsUpdateFailureCount, $pendingStateText, $servicingIndicatorCount
+        $updatesText = '{0} WU errors, update reboot {1}, restart signals {2}, servicing indicators {3}' -f $updates.WindowsUpdateFailureCount, $updateRebootText, $restartSignalText, $servicingIndicatorCount
     }
     if ($Report.Normalized.Events) {
         if (@($Report.Normalized.Events.LogsUnavailable).Count -ge 2 -and @($Report.Normalized.Events.AllEvents).Count -eq 0) {
@@ -802,7 +817,10 @@ function Export-WTMarkdownReport {
     [void]$sb.AppendLine('')
     $updates = $Report.Normalized.Updates
     if ($updates) {
-        $pendingRebootText = ConvertTo-WTYesNoUnknown -Value $updates.PendingReboot
+        $updateRebootText = ConvertTo-WTYesNoUnknown -Value $updates.PendingReboot
+        $genericRestartText = ConvertTo-WTYesNoUnknown -Value $updates.GenericRestartSignal
+        $pendingFileRenameText = ConvertTo-WTYesNoUnknown -Value $updates.PendingFileRenameOperationsPresent
+        $pendingRebootSourceText = ConvertTo-WTDisplayValue -Value $updates.PendingRebootSource -Fallback 'None'
         $cbsExistsText = ConvertTo-WTYesNoUnknown -Value $updates.CbsLog.Exists
         $dismExistsText = ConvertTo-WTYesNoUnknown -Value $updates.DismLog.Exists
         $cbsLastWriteText = 'Not available'
@@ -819,7 +837,10 @@ function Export-WTMarkdownReport {
         }
         [void]$sb.AppendLine(('* Hotfix count: {0}' -f (ConvertTo-WTDisplayValue -Value $updates.HotfixCount)))
         [void]$sb.AppendLine(('* Last hotfix installed: {0}' -f (ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $updates.LastHotfixInstalledOn) -Fallback 'Not available')))
-        [void]$sb.AppendLine(('* Pending reboot: {0}' -f $pendingRebootText))
+        [void]$sb.AppendLine(('* Update pending reboot: {0}' -f $updateRebootText))
+        [void]$sb.AppendLine(('* Generic restart signal: {0}' -f $genericRestartText))
+        [void]$sb.AppendLine(('* Pending file rename operations: {0}' -f $pendingFileRenameText))
+        [void]$sb.AppendLine(('* Pending reboot source: {0}' -f $pendingRebootSourceText))
         [void]$sb.AppendLine(('* CBS.log exists: {0}' -f $cbsExistsText))
         [void]$sb.AppendLine(('* CBS.log last write time: {0}' -f $cbsLastWriteText))
         [void]$sb.AppendLine(('* CBS.log size: {0}' -f $cbsSizeText))
@@ -1311,6 +1332,96 @@ function Get-WTRegistryBooleanState {
     catch {
         return $null
     }
+}
+
+function Get-WTPendingFileRenameOperationsInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    try {
+        $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+        $rawValue = $item.$Name
+    }
+    catch {
+        return [pscustomobject]@{
+            Present = $null
+            Count   = $null
+            Sample  = @()
+        }
+    }
+
+    $entries = @()
+    if ($null -ne $rawValue) {
+        foreach ($entry in @($rawValue)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$entry)) {
+                $entries += ([string]$entry).Trim()
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Present = ($entries.Count -gt 0)
+        Count   = $entries.Count
+        Sample  = @($entries | Select-Object -First 10)
+    }
+}
+
+function Get-WTPendingRebootSource {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$PendingDetails
+    )
+
+    if (-not $PendingDetails) {
+        return 'None'
+    }
+
+    $allPrimaryUnknown = (
+        $null -eq $PendingDetails.CbsRebootPending -and
+        $null -eq $PendingDetails.WuRebootRequired -and
+        $null -eq $PendingDetails.UpdateExeVolatile -and
+        $null -eq $PendingDetails.PendingFileRenameOperations
+    )
+    if ($allPrimaryUnknown) {
+        return 'Unknown'
+    }
+
+    $sources = New-Object System.Collections.Generic.List[string]
+
+    if ($PendingDetails.CbsRebootPending -eq $true) {
+        [void]$sources.Add('CBS')
+    }
+    if ($PendingDetails.WuRebootRequired -eq $true) {
+        [void]$sources.Add('WindowsUpdate')
+    }
+    if ($PendingDetails.UpdateExeVolatile -eq $true) {
+        [void]$sources.Add('UpdateExeVolatile')
+    }
+
+    if ($PendingDetails.GenericPendingFileRename -eq $true) {
+        if ($sources.Count -eq 0) {
+            return 'PendingFileRenameOperationsOnly'
+        }
+
+        [void]$sources.Add('PendingFileRenameOperations')
+    }
+
+    if ($sources.Count -eq 0) {
+        return 'None'
+    }
+
+    if ($sources.Count -eq 1) {
+        return $sources[0]
+    }
+
+    return 'Mixed'
 }
 
 function Get-WTUpdateCollectionLimit {
@@ -2199,16 +2310,16 @@ function Get-WTUpdateInfo {
             } | Sort-Object -Property @{ Expression = { $_.InstalledOnSort }; Descending = $true }, @{ Expression = { $_.HotFixID }; Ascending = $true })
 
             if ($hotfixes.Count -gt $hotfixLimit) {
-                Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Hotfix list truncated to the most recent {0} entries for mode {1}.' -f $hotfixLimit, $Mode)
+                [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Hotfix list truncated to the most recent {0} entries for mode {1}.' -f $hotfixLimit, $Mode))
                 $hotfixes = @($hotfixes | Select-Object -First $hotfixLimit)
             }
         }
         else {
-            Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message 'Get-HotFix is not available on this system.'
+            [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message 'Get-HotFix is not available on this system.')
         }
     }
     catch {
-        Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Get-HotFix failed: {0}' -f $_.Exception.Message)
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Get-HotFix failed: {0}' -f $_.Exception.Message))
         $hotfixes = @()
     }
 
@@ -2218,32 +2329,25 @@ function Get-WTUpdateInfo {
         $services += Get-WTServiceSnapshot -Name $serviceName
     }
 
-    $pendingRebootDetails = [pscustomobject]@{
-        CbsRebootPending          = Get-WTRegistryBooleanState -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending' -Name 'RebootPending' -Mode Presence
-        WuRebootRequired          = Get-WTRegistryBooleanState -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' -Name 'RebootRequired' -Mode Presence
-        PendingFileRenameOperations = Get-WTRegistryBooleanState -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -Mode ValuePresence
-        UpdateExeVolatile         = Get-WTRegistryBooleanState -Path 'HKLM:\SOFTWARE\Microsoft\Updates' -Name 'UpdateExeVolatile' -Mode NonZero
+    $pendingRenameInfo = Get-WTPendingFileRenameOperationsInfo -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations'
+    $pendingRebootDetails = [ordered]@{
+        CbsRebootPending            = Get-WTRegistryBooleanState -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending' -Name 'RebootPending' -Mode Presence
+        WuRebootRequired            = Get-WTRegistryBooleanState -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired' -Name 'RebootRequired' -Mode Presence
+        PendingFileRenameOperations = $pendingRenameInfo.Present
+        PendingFileRenameOperationsCount = $pendingRenameInfo.Count
+        PendingFileRenameOperationsSample = @($pendingRenameInfo.Sample)
+        UpdateExeVolatile           = Get-WTRegistryBooleanState -Path 'HKLM:\SOFTWARE\Microsoft\Updates' -Name 'UpdateExeVolatile' -Mode NonZero
     }
 
-    $anyPending = $false
-    $unknownPending = $false
-    foreach ($flagName in @('CbsRebootPending', 'WuRebootRequired', 'PendingFileRenameOperations', 'UpdateExeVolatile')) {
-        $flagValue = $pendingRebootDetails.$flagName
-        if ($flagValue -eq $true) {
-            $anyPending = $true
-        }
-        elseif ($null -eq $flagValue) {
-            $unknownPending = $true
-        }
-    }
-    $pendingState = $false
-    if ($anyPending) {
-        $pendingState = $true
-    }
-    elseif ($unknownPending) {
-        $pendingState = $null
-    }
-    $pendingRebootDetails | Add-Member -NotePropertyName AnyPendingReboot -NotePropertyValue $pendingState -Force
+    $updatePendingReboot = ($pendingRebootDetails.CbsRebootPending -eq $true -or $pendingRebootDetails.WuRebootRequired -eq $true -or $pendingRebootDetails.UpdateExeVolatile -eq $true)
+    $genericPendingFileRename = ($pendingRebootDetails.PendingFileRenameOperations -eq $true)
+    $anyRestartSignal = ($updatePendingReboot -or $genericPendingFileRename)
+    $pendingRebootDetails['UpdatePendingReboot'] = $updatePendingReboot
+    $pendingRebootDetails['GenericPendingFileRename'] = $genericPendingFileRename
+    $pendingRebootDetails['AnyRestartSignal'] = $anyRestartSignal
+    $pendingRebootDetails['AnyPendingReboot'] = $updatePendingReboot
+    $pendingRebootDetails['PendingRebootSource'] = Get-WTPendingRebootSource -PendingDetails ([pscustomobject]$pendingRebootDetails)
+    $pendingRebootDetails = [pscustomobject]$pendingRebootDetails
 
     $cbsLog = Get-WTFileMetadataInfo -Path 'C:\Windows\Logs\CBS\CBS.log'
     $dismLog = Get-WTFileMetadataInfo -Path 'C:\Windows\Logs\DISM\dism.log'
@@ -2274,7 +2378,7 @@ function Get-WTUpdateInfo {
         }
         catch {
             $wuQueryFailures++
-            Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection failed for {0}: {1}' -f $wuLogName, $_.Exception.Message)
+            [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection failed for {0}: {1}' -f $wuLogName, $_.Exception.Message))
         }
     }
 
@@ -2298,7 +2402,7 @@ function Get-WTUpdateInfo {
         }
     }
     if ($wuEvents.Count -ge $updateLimit) {
-        Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection limit reached for {0}. Results may be incomplete.' -f $wuLogName)
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection limit reached for {0}. Results may be incomplete.' -f $wuLogName))
     }
 
     $setupLogName = 'Setup'
@@ -2312,7 +2416,7 @@ function Get-WTUpdateInfo {
             LogName = $setupLogName
             Reason  = $reason
         }
-        Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection failed for {0}: {1}' -f $setupLogName, $reason)
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection failed for {0}: {1}' -f $setupLogName, $reason))
         $setupRawEvents = @()
     }
 
@@ -2329,7 +2433,7 @@ function Get-WTUpdateInfo {
         }
     }
     if ($setupEvents.Count -ge $setupLimit) {
-        Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection limit reached for {0}. Results may be incomplete.' -f $setupLogName)
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection limit reached for {0}. Results may be incomplete.' -f $setupLogName))
     }
 
     $servicingWerEvents = @()
@@ -2359,7 +2463,7 @@ function Get-WTUpdateInfo {
         Mode               = $Mode
         Hotfixes           = @($hotfixes)
         Services           = @($services)
-        PendingReboot      = $pendingRebootDetails.AnyPendingReboot
+        PendingReboot      = $pendingRebootDetails.UpdatePendingReboot
         PendingRebootDetails = $pendingRebootDetails
         CbsLog             = $cbsLog
         DismLog            = $dismLog
@@ -2391,12 +2495,23 @@ function ConvertTo-WTNormalizedUpdateInfo {
             ServicesNotRunning       = @()
             ServicesUnknown          = @()
             PendingReboot            = $null
+            GenericRestartSignal     = $null
+            PendingFileRenameOperationsPresent = $null
+            PendingFileRenameOperationsCount = $null
+            PendingFileRenameOperationsSample = @()
+            PendingRebootSource      = 'Unknown'
             PendingRebootDetails     = [pscustomobject]@{
-                CbsRebootPending          = $null
-                WuRebootRequired          = $null
+                CbsRebootPending            = $null
+                WuRebootRequired            = $null
                 PendingFileRenameOperations = $null
-                UpdateExeVolatile         = $null
-                AnyPendingReboot          = $null
+                PendingFileRenameOperationsCount = $null
+                PendingFileRenameOperationsSample = @()
+                UpdateExeVolatile           = $null
+                UpdatePendingReboot         = $null
+                GenericPendingFileRename     = $null
+                AnyRestartSignal            = $null
+                AnyPendingReboot            = $null
+                PendingRebootSource         = 'Unknown'
             }
             CbsLog                   = $null
             DismLog                  = $null
@@ -2441,13 +2556,18 @@ function ConvertTo-WTNormalizedUpdateInfo {
 
     $pending = $UpdateInfo.PendingRebootDetails
     $pendingState = $null
+    $genericRestartSignal = $null
+    $pendingFileRenamePresent = $null
+    $pendingFileRenameCount = $null
+    $pendingFileRenameSample = @()
+    $pendingSource = 'Unknown'
     if ($pending) {
-        if ($pending.AnyPendingReboot -eq $true) {
-            $pendingState = $true
-        }
-        elseif ($pending.AnyPendingReboot -eq $false) {
-            $pendingState = $false
-        }
+        $pendingState = $pending.UpdatePendingReboot
+        $genericRestartSignal = $pending.AnyRestartSignal
+        $pendingFileRenamePresent = $pending.PendingFileRenameOperations
+        $pendingFileRenameCount = $pending.PendingFileRenameOperationsCount
+        $pendingFileRenameSample = @($pending.PendingFileRenameOperationsSample)
+        $pendingSource = $pending.PendingRebootSource
     }
 
     $windowsUpdateEvents = @($UpdateInfo.WindowsUpdateEvents | Where-Object { $_ })
@@ -2560,6 +2680,11 @@ function ConvertTo-WTNormalizedUpdateInfo {
         ServicesNotRunning       = @($servicesNotRunning)
         ServicesUnknown          = @($servicesUnknown)
         PendingReboot            = $pendingState
+        GenericRestartSignal      = $genericRestartSignal
+        PendingFileRenameOperationsPresent = $pendingFileRenamePresent
+        PendingFileRenameOperationsCount = $pendingFileRenameCount
+        PendingFileRenameOperationsSample = @($pendingFileRenameSample)
+        PendingRebootSource       = $pendingSource
         PendingRebootDetails     = $pending
         CbsLog                   = $UpdateInfo.CbsLog
         DismLog                  = $UpdateInfo.DismLog
@@ -2669,16 +2794,32 @@ function Invoke-WTUpdateRules {
         $latestWuError = @($wuErrors | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
         $ids = @($wuErrors | Group-Object -Property Id | Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true } | Select-Object -First 5 | ForEach-Object { '{0}({1})' -f $_.Name, $_.Count })
         $severity = if ($wuErrors.Count -ge 3) { 'High' } else { 'Medium' }
-        Add-WTFinding -Report $Report -Id 'WT-UPD-WU-ERRORS' -Category 'Updates' -Severity $severity -Title 'Windows Update errors detected' -Description 'Windows Update logged one or more error events during the analysis window.' -Evidence @("Count=$($wuErrors.Count)", ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestWuError[0].TimeCreated)), ('Ids={0}' -f ($ids -join ', ')), ('MessageShort={0}' -f $latestWuError[0].MessageShort)) -Recommendation 'Review Windows Update history, network/proxy access, disk space, pending reboot and servicing health before attempting repairs.' -Source 'Invoke-WTUpdateRules' -Status 'Warning'
+        [void](Add-WTFinding -Report $Report -Id 'WT-UPD-WU-ERRORS' -Category 'Updates' -Severity $severity -Title 'Windows Update errors detected' -Description 'Windows Update logged one or more error events during the analysis window.' -Evidence @("Count=$($wuErrors.Count)", ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestWuError[0].TimeCreated)), ('Ids={0}' -f ($ids -join ', ')), ('MessageShort={0}' -f $latestWuError[0].MessageShort)) -Recommendation 'Review Windows Update history, network/proxy access, disk space, pending reboot and servicing health before attempting repairs.' -Source 'Invoke-WTUpdateRules' -Status 'Warning')
     }
 
-    if ($pending -and $pending.AnyPendingReboot -eq $true) {
-        Add-WTFinding -Report $Report -Id 'WT-UPD-PENDING-REBOOT' -Category 'Updates' -Severity 'Low' -Title 'Pending reboot detected' -Description 'Windows indicates that a reboot may be pending due to updates, CBS, pending file rename operations or update installer state.' -Evidence @(
+    if ($pending -and $pending.UpdatePendingReboot -eq $true) {
+        [void](Add-WTFinding -Report $Report -Id 'WT-UPD-PENDING-REBOOT' -Category 'Updates' -Severity 'Low' -Title 'Pending reboot detected' -Description 'Windows indicates that a reboot may be pending due to updates, CBS, or update installer state.' -Evidence @(
             ('CbsRebootPending={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.CbsRebootPending)),
             ('WuRebootRequired={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.WuRebootRequired)),
+            ('UpdateExeVolatile={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.UpdateExeVolatile)),
+            ('UpdatePendingReboot={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.UpdatePendingReboot)),
+            ('PendingRebootSource={0}' -f (ConvertTo-WTDisplayValue -Value $pending.PendingRebootSource -Fallback 'None'))
+        ) -Recommendation 'Schedule a controlled restart before further troubleshooting, especially before running repair actions.' -Source 'Invoke-WTUpdateRules' -Status 'Warning')
+    }
+
+    if ($pending -and $pending.UpdatePendingReboot -ne $true -and $pending.GenericPendingFileRename -eq $true) {
+        $sampleText = 'None'
+        if ($pending.PendingFileRenameOperationsSample -and @($pending.PendingFileRenameOperationsSample).Count -gt 0) {
+            $sampleText = @($pending.PendingFileRenameOperationsSample | Select-Object -First 5) -join '; '
+        }
+        [void](Add-WTFinding -Report $Report -Id 'WT-UPD-PENDING-FILE-RENAME' -Category 'Updates' -Severity 'Info' -Title 'Pending file rename operations detected' -Description 'Windows has pending file rename operations registered. This may be caused by installers, drivers, antivirus, agents or third-party software and does not necessarily mean Windows Update requires a reboot.' -Evidence @(
             ('PendingFileRenameOperations={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.PendingFileRenameOperations)),
-            ('UpdateExeVolatile={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.UpdateExeVolatile))
-        ) -Recommendation 'Schedule a controlled restart before further troubleshooting, especially before running repair actions.' -Source 'Invoke-WTUpdateRules' -Status 'Warning'
+            ('PendingFileRenameOperationsCount={0}' -f (Get-WTDisplayValue -Value $pending.PendingFileRenameOperationsCount -Fallback 'Unknown')),
+            ('Sample={0}' -f $sampleText),
+            'UpdatePendingReboot=False',
+            ('CbsRebootPending={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.CbsRebootPending)),
+            ('WuRebootRequired={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.WuRebootRequired))
+        ) -Recommendation 'Correlate with recent software installations, driver updates or security agents. Do not treat this alone as Windows Update requiring a reboot.' -Source 'Invoke-WTUpdateRules' -Status 'Info')
     }
 
     if ($servicesNotRunning.Count -gt 0) {
@@ -2686,7 +2827,7 @@ function Invoke-WTUpdateRules {
         foreach ($svc in $servicesNotRunning) {
             $serviceEvidence += ('{0}={1} ({2})' -f $svc.Name, $svc.Status, $svc.StartType)
         }
-        Add-WTFinding -Report $Report -Id 'WT-UPD-SERVICES-NOT-RUNNING' -Category 'Updates' -Severity 'Medium' -Title 'Windows Update related services are not running' -Description 'One or more Windows Update related services are not running.' -Evidence $serviceEvidence -Recommendation 'Review service startup type and recent service control events. Do not restart services automatically from this tool.' -Source 'Invoke-WTUpdateRules' -Status 'Warning'
+        [void](Add-WTFinding -Report $Report -Id 'WT-UPD-SERVICES-NOT-RUNNING' -Category 'Updates' -Severity 'Medium' -Title 'Windows Update related services are not running' -Description 'One or more Windows Update related services are not running.' -Evidence $serviceEvidence -Recommendation 'Review service startup type and recent service control events. Do not restart services automatically from this tool.' -Source 'Invoke-WTUpdateRules' -Status 'Warning')
     }
 
     $servicingWerNames = @($servicingWerEvents | Select-Object -ExpandProperty WerEventName | Where-Object { $_ } | Group-Object | Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true } | Select-Object -First 5 | ForEach-Object { '{0}({1})' -f $_.Name, $_.Count })
@@ -2695,49 +2836,49 @@ function Invoke-WTUpdateRules {
 
     if ($updates.CbsLog -and $updates.CbsLog.IsRecentlyModified -and $servicingWerEvents.Count -gt 0) {
         $latestServicing = @($servicingWerEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
-        Add-WTFinding -Report $Report -Id 'WT-UPD-SERVICING-INDICATORS' -Category 'Updates' -Severity 'Medium' -Title 'Potential Windows servicing or component store issue detected' -Description 'Windows logged servicing-related WER events and CBS.log was recently modified.' -Evidence @(
+        [void](Add-WTFinding -Report $Report -Id 'WT-UPD-SERVICING-INDICATORS' -Category 'Updates' -Severity 'Medium' -Title 'Potential Windows servicing or component store issue detected' -Description 'Windows logged servicing-related WER events and CBS.log was recently modified.' -Evidence @(
             ('CBSLastWriteTime={0}' -f (ConvertTo-WTDateTimeString -Value $updates.CbsLog.LastWriteTime)),
             ('ServicingWerCount={0}' -f $servicingWerEvents.Count),
             ('WerEventNames={0}' -f ($servicingWerNames -join ', ')),
             ('ExampleMessageShort={0}' -f $latestServicing[0].MessageShort)
-        ) -Recommendation 'Review CBS.log and Windows Update history. If symptoms persist, consider manual DISM/SFC repair in a controlled remediation step, not from this read-only triage.' -Source 'Invoke-WTUpdateRules' -Status 'Warning'
+        ) -Recommendation 'Review CBS.log and Windows Update history. If symptoms persist, consider manual DISM/SFC repair in a controlled remediation step, not from this read-only triage.' -Source 'Invoke-WTUpdateRules' -Status 'Warning')
     }
 
     foreach ($evt in @($servicingWerEvents)) {
         if ($evt.WerEventName -eq 'WindowsWcpOtherFailure3') {
             $latest = @($servicingWerEvents | Where-Object { $_.WerEventName -eq 'WindowsWcpOtherFailure3' } | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
-            Add-WTFinding -Report $Report -Id 'WT-UPD-WCP-FAILURE' -Category 'Updates' -Severity 'Medium' -Title 'Windows component servicing WER failure detected' -Description 'Windows Error Reporting logged WindowsWcpOtherFailure3 events, which may indicate component servicing or CBS issues.' -Evidence @(
+            [void](Add-WTFinding -Report $Report -Id 'WT-UPD-WCP-FAILURE' -Category 'Updates' -Severity 'Medium' -Title 'Windows component servicing WER failure detected' -Description 'Windows Error Reporting logged WindowsWcpOtherFailure3 events, which may indicate component servicing or CBS issues.' -Evidence @(
                 ('Count={0}' -f @($servicingWerEvents | Where-Object { $_.WerEventName -eq 'WindowsWcpOtherFailure3' }).Count),
                 ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latest[0].TimeCreated)),
                 ('MessageShort={0}' -f $latest[0].MessageShort),
                 ('WerEventNames={0}' -f ($servicingWerNames -join ', '))
-            ) -Recommendation 'Review CBS.log, DISM log, update history and component store health. Treat this as a servicing signal, not an application crash.' -Source 'Invoke-WTUpdateRules' -Status 'Warning'
+            ) -Recommendation 'Review CBS.log, DISM log, update history and component store health. Treat this as a servicing signal, not an application crash.' -Source 'Invoke-WTUpdateRules' -Status 'Warning')
             break
         }
     }
 
     if ($storeWerEvents.Count -ge 5) {
         $latestStore = @($storeWerEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
-        Add-WTFinding -Report $Report -Id 'WT-UPD-STORE-WER' -Category 'Updates' -Severity 'Low' -Title 'Microsoft Store update related WER events detected' -Description 'Windows logged multiple StoreAgent or AppX deployment WER events.' -Evidence @(
+        [void](Add-WTFinding -Report $Report -Id 'WT-UPD-STORE-WER' -Category 'Updates' -Severity 'Low' -Title 'Microsoft Store update related WER events detected' -Description 'Windows logged multiple StoreAgent or AppX deployment WER events.' -Evidence @(
             ('Count={0}' -f $storeWerEvents.Count),
             ('WerEventNames={0}' -f ($storeWerNames -join ', ')),
             ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestStore[0].TimeCreated))
-        ) -Recommendation 'Review only if users report Store app, AppX, winget, WebView, or packaged app update problems.' -Source 'Invoke-WTUpdateRules' -Status 'Warning'
+        ) -Recommendation 'Review only if users report Store app, AppX, winget, WebView, or packaged app update problems.' -Source 'Invoke-WTUpdateRules' -Status 'Warning')
     }
 
     if ($edgeWerEvents.Count -ge 3) {
         $latestEdge = @($edgeWerEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
-        Add-WTFinding -Report $Report -Id 'WT-UPD-EDGEUPDATE-WER' -Category 'Updates' -Severity 'Low' -Title 'Edge/WebView update related WER events detected' -Description 'Windows logged Edge Update or WebView update related WER events.' -Evidence @(
+        [void](Add-WTFinding -Report $Report -Id 'WT-UPD-EDGEUPDATE-WER' -Category 'Updates' -Severity 'Low' -Title 'Edge/WebView update related WER events detected' -Description 'Windows logged Edge Update or WebView update related WER events.' -Evidence @(
             ('Count={0}' -f $edgeWerEvents.Count),
             ('WerEventNames={0}' -f ($edgeWerNames -join ', ')),
             ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestEdge[0].TimeCreated))
-        ) -Recommendation 'Review only if users report browser, WebView, Teams, Outlook, embedded web component or app update symptoms.' -Source 'Invoke-WTUpdateRules' -Status 'Warning'
+        ) -Recommendation 'Review only if users report browser, WebView, Teams, Outlook, embedded web component or app update symptoms.' -Source 'Invoke-WTUpdateRules' -Status 'Warning')
     }
 
     $wuLogsUnavailable = @($updates.LogsUnavailable | Where-Object { $_.LogName -eq 'Microsoft-Windows-WindowsUpdateClient/Operational' })
-    $hasNoIssues = ($wuErrors.Count -eq 0 -and $wuWarnings.Count -eq 0 -and $pending -and $pending.AnyPendingReboot -eq $false -and $servicesNotRunning.Count -eq 0 -and $servicingWerEvents.Count -eq 0 -and $storeWerEvents.Count -eq 0 -and $edgeWerEvents.Count -eq 0 -and $wuLogsUnavailable.Count -eq 0)
+    $hasNoIssues = ($wuErrors.Count -eq 0 -and $wuWarnings.Count -eq 0 -and $pending -and $pending.UpdatePendingReboot -eq $false -and $pending.GenericPendingFileRename -eq $false -and $servicesNotRunning.Count -eq 0 -and $servicingWerEvents.Count -eq 0 -and $storeWerEvents.Count -eq 0 -and $edgeWerEvents.Count -eq 0 -and $wuLogsUnavailable.Count -eq 0)
     if ($hasNoIssues) {
-        Add-WTFinding -Report $Report -Id 'WT-UPD-NO-ISSUES' -Category 'Updates' -Severity 'Info' -Title 'No Windows Update or servicing issues detected' -Description 'No relevant Windows Update, CBS, servicing or Store update indicators were detected in the selected window.' -Evidence @("Days=$($updates.Days)", "HotfixCount=$($updates.HotfixCount)", 'WindowsUpdateFailureCount=0') -Recommendation 'No action required based on this scope.' -Source 'Invoke-WTUpdateRules' -Status 'Pass'
+        [void](Add-WTFinding -Report $Report -Id 'WT-UPD-NO-ISSUES' -Category 'Updates' -Severity 'Info' -Title 'No Windows Update or servicing issues detected' -Description 'No relevant Windows Update, CBS, servicing or Store update indicators were detected in the selected window.' -Evidence @("Days=$($updates.Days)", "HotfixCount=$($updates.HotfixCount)", 'WindowsUpdateFailureCount=0') -Recommendation 'No action required based on this scope.' -Source 'Invoke-WTUpdateRules' -Status 'Pass')
     }
 }
 
@@ -4094,7 +4235,7 @@ function Invoke-WinTriage {
         $report.Metadata.MarkdownPath = $markdownPath
 
         if ($resolvedOutput.UsedFallback) {
-            Add-WTExecutionWarning -Report $report -Scope 'OutputPath' -Message ('Fallback output path used because the requested path could not be created. Requested: {0}. Fallback: {1}. Reason: {2}' -f $resolvedOutput.RequestedPath, $resolvedOutput.FallbackPath, $resolvedOutput.FallbackReason)
+            [void](Add-WTExecutionWarning -Report $report -Scope 'OutputPath' -Message ('Fallback output path used because the requested path could not be created. Requested: {0}. Fallback: {1}. Reason: {2}' -f $resolvedOutput.RequestedPath, $resolvedOutput.FallbackPath, $resolvedOutput.FallbackReason))
         }
 
         $systemRaw = Invoke-WTSafeCollector -Report $report -Name 'SystemInfo' -ScriptBlock {
@@ -4190,7 +4331,7 @@ function Invoke-WinTriage {
             if ([string]::IsNullOrWhiteSpace($eventProcessParsingWarningMessage)) {
                 $eventProcessParsingWarningMessage = 'Application crash event contains a process name pattern but process extraction failed.'
             }
-            Add-WTExecutionWarning -Report $report -Scope 'EventProcessParsing' -Message $eventProcessParsingWarningMessage
+            [void](Add-WTExecutionWarning -Report $report -Scope 'EventProcessParsing' -Message $eventProcessParsingWarningMessage)
         }
 
         $updateRaw = Invoke-WTSafeCollector -Report $report -Name 'UpdateInfo' -ScriptBlock {
@@ -4223,7 +4364,7 @@ function Invoke-WinTriage {
         }
         $report.Normalized.Services = $report.Raw.Services
 
-        Add-WTFinding -Report $report `
+        [void](Add-WTFinding -Report $report `
             -Id 'WT-RO-001' `
             -Category 'Framework' `
             -Severity 'Info' `
@@ -4233,9 +4374,9 @@ function Invoke-WinTriage {
             -Recommendation 'No action required.' `
             -Source 'Invoke-WinTriage' `
             -Status 'Info' `
-            -RequiresAdmin $false
+            -RequiresAdmin $false)
 
-        Add-WTFinding -Report $report `
+        [void](Add-WTFinding -Report $report `
             -Id 'WT-MODE-001' `
             -Category 'Framework' `
             -Severity 'Info' `
@@ -4245,7 +4386,7 @@ function Invoke-WinTriage {
             -Recommendation 'No action required.' `
             -Source 'Invoke-WinTriage' `
             -Status 'Info' `
-            -RequiresAdmin $false
+            -RequiresAdmin $false)
 
         Invoke-WTSafeStep -Report $report -Name 'UpdateRules' -ScriptBlock {
             Invoke-WTUpdateRules -Report $report
@@ -4270,8 +4411,8 @@ function Invoke-WinTriage {
         } | Out-Null
 
         if (-not $isAdmin) {
-            Add-WTSkippedCheck -Report $report -Check 'AdminExample' -Reason 'Skipped example because the script is not running elevated.'
-            Add-WTFinding -Report $report `
+            [void](Add-WTSkippedCheck -Report $report -Check 'AdminExample' -Reason 'Skipped example because the script is not running elevated.')
+            [void](Add-WTFinding -Report $report `
                 -Id 'WT-SKIP-001' `
                 -Category 'Privilege' `
                 -Severity 'Skipped' `
@@ -4281,7 +4422,7 @@ function Invoke-WinTriage {
                 -Recommendation 'Rerun elevated only if a future admin-only collector requires it.' `
                 -Source 'Invoke-WinTriage' `
                 -Status 'Skipped' `
-                -RequiresAdmin $true
+                -RequiresAdmin $true)
         }
         else {
             Invoke-WTSafeCollector -Report $report -Name 'AdminExample' -RequiresAdmin $true -ScriptBlock {
@@ -4314,7 +4455,7 @@ function Invoke-WinTriage {
                 $report.Metadata.MarkdownGenerated = $true
             }
             catch {
-                Add-WTExecutionWarning -Report $report -Scope 'MarkdownExport' -Message ('Unable to write Markdown report. {0}' -f $_.Exception.Message)
+                [void](Add-WTExecutionWarning -Report $report -Scope 'MarkdownExport' -Message ('Unable to write Markdown report. {0}' -f $_.Exception.Message))
                 $report.Metadata.MarkdownGenerated = $false
             }
         }
@@ -4324,7 +4465,7 @@ function Invoke-WinTriage {
                 Invoke-Item -LiteralPath $markdownPath
             }
             catch {
-                Add-WTExecutionWarning -Report $report -Scope 'OpenReport' -Message ('Unable to open Markdown report. {0}' -f $_.Exception.Message)
+                [void](Add-WTExecutionWarning -Report $report -Scope 'OpenReport' -Message ('Unable to open Markdown report. {0}' -f $_.Exception.Message))
             }
         }
 
@@ -4347,7 +4488,7 @@ function Invoke-WinTriage {
                     $report.Metadata.MarkdownGenerated = $true
                 }
                 catch {
-                    Add-WTExecutionWarning -Report $report -Scope 'MarkdownExport' -Message ('Unable to write Markdown report after fatal error. {0}' -f $_.Exception.Message)
+                    [void](Add-WTExecutionWarning -Report $report -Scope 'MarkdownExport' -Message ('Unable to write Markdown report after fatal error. {0}' -f $_.Exception.Message))
                 }
             }
             try {
@@ -4356,7 +4497,7 @@ function Invoke-WinTriage {
             }
             catch {
                 $report.Metadata.JsonGenerated = $false
-                Add-WTExecutionWarning -Report $report -Scope 'JsonExport' -Message ('Unable to write JSON report after fatal error. {0}' -f $_.Exception.Message)
+                [void](Add-WTExecutionWarning -Report $report -Scope 'JsonExport' -Message ('Unable to write JSON report after fatal error. {0}' -f $_.Exception.Message))
             }
             try {
                 Write-WTConsoleSummary -Report $report -NoColor:$script:WTNoColor
