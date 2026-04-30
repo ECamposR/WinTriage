@@ -49,3 +49,6 @@
 - Added a read-only services and agents diagnostics module with service inventory, SCM event parsing, corporate agent detection, duplicate/legacy agent heuristics, service/crash correlation and CSV/Markdown integration.
 - Bumped script version to `0.6.0` after integrating the services and agents module.
 - Fixed a Markdown export parser regression in the services section by removing stray parentheses from table rows.
+- Hardened the services and agents module to parse localized SCM events better, separate likely-normal auto-stopped services, classify managed remote tools explicitly, and prioritize NComputing/vSpace over Action1 when correlating `mxdhcp.exe`.
+- Bumped script version to `0.6.1` after tightening services correlation, legacy agent detection, and service-event parsing.
+- Fixed a `ServicesRules` runtime regression caused by an inline `if` expression inside `-f` formatting, restoring normal service-rule execution.
