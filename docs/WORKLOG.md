@@ -53,3 +53,6 @@
 - Bumped script version to `0.6.1` after tightening services correlation, legacy agent detection, and service-event parsing.
 - Fixed a `ServicesRules` runtime regression caused by an inline `if` expression inside `-f` formatting, restoring normal service-rule execution.
 - Bumped script version to `0.6.2` after the services hotfix and parser adjustments.
+- Fixed the real Service Control Manager 7031 flow so Spanish service failures preserve `ServiceName`, `CurrentState`, and `RecoveryAction` instead of collapsing to `Unknown`.
+- Bumped script version to `0.6.3` after hardening the SCM 7031/7034 real-flow parser and service-event self-test.
+- Published the SCM 7031/7034 hotfix after validating the real-flow service parser path and service-event self-test coverage.

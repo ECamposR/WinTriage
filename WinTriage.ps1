@@ -18,7 +18,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.6.2'
+$script:WTVersion = '0.6.3'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -643,11 +643,13 @@ function Test-WTRequiredFunctions {
         'Add-WTExecutionError'
         'Add-WTExecutionWarning'
         'ConvertTo-WTMarkdownCell'
+        'Get-WTEventPropertyValueSafe'
         'Get-WTDefenderInfo'
         'ConvertTo-WTNormalizedDefenderInfo'
         'Invoke-WTDefenderRules'
         'Get-WTServiceBinaryInfo'
         'Get-WTServiceEventFields'
+        'ConvertTo-WTServiceEventRecord'
         'Get-WTServiceCorrelationMatch'
         'Invoke-WTServiceEventParserSelfTest'
         'Get-WTServicesInfo'
@@ -3220,11 +3222,9 @@ function Get-WTServiceEventFields {
         7032 { $serviceEventType = 'RecoveryAction' }
     }
 
-    $lines = @($Event.Message, $Event.MessageShort) -join "`n" -split "`r?`n"
-    $lineCount = 0
+    $lines = @($text -split "`r?`n")
     foreach ($line in $lines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $lineCount++
         $trimmed = $line.Trim()
 
         if (-not $serviceName -and $trimmed -match '^(?:Nombre del servicio|Service Name)\s*:\s*(?<value>.+)$') {
@@ -3256,33 +3256,33 @@ function Get-WTServiceEventFields {
         }
 
         if (-not $failureCount) {
-            if ($trimmed -match '(?i)\bEsto se ha repetido\s+(?<count>\d+)\s+ve(?:z|ces)\b') {
+            if ($trimmed -match '(?i)Esto\s+se\s+ha\s+repetido\s+(?<count>\d+)\s+ve(?:z|ces)') {
                 $parseLanguage = 'es'
                 $failureCount = [int]$matches.count
             }
-            elseif ($trimmed -match '(?i)\bIt has done this\s+(?<count>\d+)\s+time\(s\)\b') {
+            elseif ($trimmed -match '(?i)It\s+has\s+done\s+this\s+(?<count>\d+)\s+time\(s\)') {
                 if ($parseLanguage -eq 'unknown') { $parseLanguage = 'en' }
                 $failureCount = [int]$matches.count
             }
         }
 
         if (-not $serviceName) {
-            if ($trimmed -match '(?i)\bEl servicio\s+(?<name>.+?)\s+termin[oó]\s+inesperadamente\b') {
+            if ($trimmed -match '(?i)El\s+servicio\s+(?<name>.+?)\s+termin[oó]\s+inesperadamente') {
                 $parseLanguage = 'es'
                 $serviceName = $matches.name.Trim()
             }
-            elseif ($trimmed -match '(?i)\bThe\s+(?<name>.+?)\s+service\s+terminated unexpectedly\b') {
+            elseif ($trimmed -match '(?i)The\s+(?<name>.+?)\s+service\s+terminated\s+unexpectedly') {
                 if ($parseLanguage -eq 'unknown') { $parseLanguage = 'en' }
                 $serviceName = $matches.name.Trim()
             }
         }
 
         if (-not $recoveryAction) {
-            if ($trimmed -match '(?i)\bacción correctora en\s+\d+\s+milisegundos:\s*(?<action>.+?)(?:\.|$)') {
+            if ($trimmed -match '(?i)acción\s+correctora\s+en\s+\d+\s+milisegundos:\s*(?<action>.+?)(?:\.|$)') {
                 $parseLanguage = 'es'
                 $recoveryAction = $matches.action.Trim()
             }
-            elseif ($trimmed -match '(?i)\bThe following corrective action will be taken in\s+\d+\s+milliseconds:\s*(?<action>.+?)(?:\.|$)') {
+            elseif ($trimmed -match '(?i)The\s+following\s+corrective\s+action\s+will\s+be\s+taken\s+in\s+\d+\s+milliseconds:\s*(?<action>.+?)(?:\.|$)') {
                 if ($parseLanguage -eq 'unknown') { $parseLanguage = 'en' }
                 $recoveryAction = $matches.action.Trim()
             }
@@ -3329,6 +3329,160 @@ function Get-WTServiceEventDetails {
     )
 
     return Get-WTServiceEventFields -Event $Event
+}
+
+function Get-WTEventPropertyValueSafe {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$Event,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Index,
+
+        [AllowNull()]
+        [object]$Fallback = $null
+    )
+
+    if (-not $Event) {
+        return $Fallback
+    }
+
+    $properties = $null
+    foreach ($propName in @('Properties', 'EventProperties')) {
+        if ($Event.PSObject.Properties.Name -contains $propName) {
+            try {
+                $properties = @($Event.$propName)
+            }
+            catch {
+                $properties = $null
+            }
+            if ($properties) { break }
+        }
+    }
+
+    if (-not $properties -or $Index -lt 0 -or $Index -ge @($properties).Count) {
+        return $Fallback
+    }
+
+    $value = $null
+    try {
+        $candidate = $properties[$Index]
+        if ($candidate -and $candidate.PSObject.Properties.Name -contains 'Value') {
+            $value = $candidate.Value
+        }
+        else {
+            $value = $candidate
+        }
+    }
+    catch {
+        $value = $null
+    }
+
+    if ($null -eq $value -or $value -eq '') {
+        return $Fallback
+    }
+
+    return $value
+}
+
+function ConvertTo-WTServiceEventRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Event,
+
+        [AllowNull()]
+        [psobject[]]$ServiceInventory = @()
+    )
+
+    $details = Get-WTServiceEventFields -Event $Event
+    $currentServiceMatched = $false
+    $currentServiceName = $null
+    $currentDisplayName = $null
+    $currentServicePath = $null
+    $currentState = $null
+
+    if ($details.ServiceName -and $ServiceInventory) {
+        $inventoryMatch = @($ServiceInventory | Where-Object {
+            $_ -and (
+                ($_.Name -and $_.Name -ieq $details.ServiceName) -or
+                ($_.DisplayName -and $_.DisplayName -ieq $details.ServiceName)
+            )
+        } | Select-Object -First 1)
+
+        if ($inventoryMatch.Count -gt 0) {
+            $currentServiceMatched = $true
+            $currentServiceName = $inventoryMatch[0].Name
+            $currentDisplayName = $inventoryMatch[0].DisplayName
+            $currentServicePath = $inventoryMatch[0].PathName
+            $currentState = $inventoryMatch[0].State
+        }
+    }
+
+    $propertyServiceName = $null
+    $rawParseStatus = $details.RawParseStatus
+    if ($Event.Id -in @(7031, 7034)) {
+        $propertyServiceName = Get-WTEventPropertyValueSafe -Event $Event -Index 0 -Fallback $null
+        if (-not [string]::IsNullOrWhiteSpace([string]$propertyServiceName) -and [string]::IsNullOrWhiteSpace($details.ServiceName)) {
+            $details.ServiceName = [string]$propertyServiceName
+        }
+    }
+
+    if ($details.ServiceName -and -not $currentServiceMatched -and $ServiceInventory) {
+        $inventoryMatch = @($ServiceInventory | Where-Object {
+            $_ -and (
+                ($_.Name -and $_.Name -ieq $details.ServiceName) -or
+                ($_.DisplayName -and $_.DisplayName -ieq $details.ServiceName)
+            )
+        } | Select-Object -First 1)
+        if ($inventoryMatch.Count -gt 0) {
+            $currentServiceMatched = $true
+            $currentServiceName = $inventoryMatch[0].Name
+            $currentDisplayName = $inventoryMatch[0].DisplayName
+            $currentServicePath = $inventoryMatch[0].PathName
+            $currentState = $inventoryMatch[0].State
+        }
+    }
+
+    if ($Event.Id -in @(7031, 7034)) {
+        if ($details.ServiceName -and $details.FailureCount -ne $null) {
+            $rawParseStatus = 'Parsed'
+        }
+        elseif ($details.ServiceName -or $details.ServiceFileName -or $details.ServiceAccount -or $details.StartTypeFromEvent -or $details.RecoveryAction -or $details.FailureCount -ne $null) {
+            $rawParseStatus = 'Partial'
+        }
+    }
+    elseif ($details.ServiceName -and ($details.ServiceFileName -or $details.ServiceAccount -or $details.StartTypeFromEvent -or $details.RecoveryAction -or $details.FailureCount -ne $null)) {
+        $rawParseStatus = 'Parsed'
+    }
+
+    return [pscustomobject]@{
+        TimeCreated           = $Event.TimeCreated
+        LogName               = $Event.LogName
+        ProviderName          = $Event.ProviderName
+        Id                    = $Event.Id
+        Level                 = $Event.Level
+        LevelDisplayName      = $Event.LevelDisplayName
+        Message               = $Event.Message
+        MessageShort          = $Event.MessageShort
+        MachineName           = $Event.MachineName
+        ServiceName           = $details.ServiceName
+        ServiceFileName       = $details.ServiceFileName
+        ServiceAccount        = $details.ServiceAccount
+        StartTypeFromEvent     = $details.StartTypeFromEvent
+        RecoveryAction        = $details.RecoveryAction
+        FailureCount          = $details.FailureCount
+        RawParseStatus        = $rawParseStatus
+        ParseLanguage         = $details.ParseLanguage
+        ServiceEventType      = $details.ServiceEventType
+        CurrentState          = $currentState
+        CurrentDisplayName    = $currentDisplayName
+        CurrentServiceName    = $currentServiceName
+        CurrentServicePath    = $currentServicePath
+        CurrentServiceMatched = $currentServiceMatched
+        ParseSource           = if ($details.ServiceName -and $details.FailureCount -ne $null -and $propertyServiceName) { 'Mixed' } elseif ($details.ServiceName -and $propertyServiceName) { 'Mixed' } elseif ($details.ServiceName) { 'MessageRegex' } elseif ($propertyServiceName) { 'EventProperties' } else { 'MessageRegex' }
+    }
 }
 
 function Get-WTServiceAgentClassification {
@@ -3706,33 +3860,14 @@ function Get-WTServicesInfo {
     $serviceInstallEvents = @()
     $serviceStartTypeChangeEvents = @()
     $serviceSeenKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    $serviceInventorySnapshot = @($serviceIndex.Values)
     foreach ($evt in @($serviceEventSource | Sort-Object -Property TimeCreated -Descending)) {
         if (-not $evt) { continue }
         $key = Get-WTEventKey -Event $evt
         if ($key -and -not $serviceSeenKeys.Add($key)) { continue }
-        $details = Get-WTServiceEventFields -Event $evt
-        $serviceEvent = [pscustomobject]@{
-            TimeCreated        = $evt.TimeCreated
-            LogName            = $evt.LogName
-            ProviderName       = $evt.ProviderName
-            Id                 = $evt.Id
-            Level              = $evt.Level
-            LevelDisplayName   = $evt.LevelDisplayName
-            Message            = $evt.Message
-            MessageShort       = $evt.MessageShort
-            MachineName        = $evt.MachineName
-            ServiceName        = $details.ServiceName
-            ServiceFileName    = $details.ServiceFileName
-            ServiceAccount     = $details.ServiceAccount
-            StartTypeFromEvent = $details.StartTypeFromEvent
-            RecoveryAction     = $details.RecoveryAction
-            FailureCount       = $details.FailureCount
-            RawParseStatus     = $details.RawParseStatus
-            ParseLanguage      = $details.ParseLanguage
-            ServiceEventType   = $details.ServiceEventType
-        }
+        $serviceEvent = ConvertTo-WTServiceEventRecord -Event $evt -ServiceInventory $serviceInventorySnapshot
         $serviceEvents += $serviceEvent
-        switch ($details.ServiceEventType) {
+        switch ($serviceEvent.ServiceEventType) {
             'Install' { $serviceInstallEvents += $serviceEvent }
             'StartTypeChange' { $serviceStartTypeChangeEvents += $serviceEvent }
             default { $serviceFailureEvents += $serviceEvent }
@@ -6338,6 +6473,8 @@ Id. de aplicación relacionado con el paquete con errores:
             ExpectedProcessName = 'mxdhcp.exe'
             ExpectedProcessPath = 'C:\Program Files\NComputing\vSpace Server Software\mxdhcp.exe'
             ExpectedSourcePattern = 'SpanishFaultingApplicationName'
+            ExpectedCurrentServiceMatched = $true
+            ExpectedCurrentState = 'Running'
         },
         [pscustomobject]@{
             Name = 'WER APPCRASH Spanish'
@@ -6354,6 +6491,8 @@ P2: 1.1.0.3
             ExpectedProcessName = 'mxdhcp.exe'
             ExpectedProcessPath = $null
             ExpectedSourcePattern = 'WerP1CrashExecutable'
+            ExpectedCurrentServiceMatched = $true
+            ExpectedCurrentState = 'Running'
         },
         [pscustomobject]@{
             Name = 'WER NonCritical GDIObjectLeak'
@@ -6370,6 +6509,8 @@ P2: 0.0.0.0
             ExpectedProcessName = $null
             ExpectedProcessPath = $null
             ExpectedSourcePattern = $null
+            ExpectedCurrentServiceMatched = $false
+            ExpectedCurrentState = $null
         },
         [pscustomobject]@{
             Name = 'WER NonCritical AppxDeploymentFailureBlue'
@@ -6386,6 +6527,8 @@ P2: Windows.Desktop
             ExpectedProcessName = $null
             ExpectedProcessPath = $null
             ExpectedSourcePattern = $null
+            ExpectedCurrentServiceMatched = $false
+            ExpectedCurrentState = $null
         }
     )
 
@@ -6393,11 +6536,25 @@ P2: Windows.Desktop
     $failed = $false
 
     foreach ($test in $tests) {
-        $actual = Get-WTEventProcessName -Message $test.Message -MessageShort $test.MessageShort -ProviderName $test.ProviderName -Id $test.Id -WerEventName $test.WerEventName
+        $actual = ConvertTo-WTServiceEventRecord -Event ([pscustomobject]@{
+            Id = $test.Id
+            ProviderName = $test.ProviderName
+            LogName = 'Application'
+            Level = 2
+            LevelDisplayName = 'Error'
+            TimeCreated = Get-Date
+            Message = $test.Message
+            MessageShort = $test.MessageShort
+            MachineName = $env:COMPUTERNAME
+            EventProperties = @()
+            WerEventName = $test.WerEventName
+        }) -ServiceInventory $serviceInventory
         $pass = (
-            $actual.ProcessName -eq $test.ExpectedProcessName -and
-            $actual.ProcessPath -eq $test.ExpectedProcessPath -and
-            $actual.SourcePattern -eq $test.ExpectedSourcePattern
+            $actual.ServiceName -eq $test.ExpectedProcessName -and
+            $actual.ServiceFileName -eq $test.ExpectedProcessPath -and
+            $actual.ParseSource -eq $test.ExpectedSourcePattern -and
+            $actual.CurrentServiceMatched -eq $test.ExpectedCurrentServiceMatched -and
+            $actual.CurrentState -eq $test.ExpectedCurrentState
         )
 
         if ($pass) {
@@ -6407,22 +6564,30 @@ P2: Windows.Desktop
             $failed = $true
             Write-Host ('FAIL: {0}' -f $test.Name) -ForegroundColor Red
             Write-Host ('  Expected ProcessName={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedProcessName)) -ForegroundColor Red
-            Write-Host ('  Actual   ProcessName={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ProcessName)) -ForegroundColor Red
+            Write-Host ('  Actual   ProcessName={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ServiceName)) -ForegroundColor Red
             Write-Host ('  Expected ProcessPath={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedProcessPath)) -ForegroundColor Red
-            Write-Host ('  Actual   ProcessPath={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ProcessPath)) -ForegroundColor Red
+            Write-Host ('  Actual   ProcessPath={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ServiceFileName)) -ForegroundColor Red
             Write-Host ('  Expected SourcePattern={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedSourcePattern)) -ForegroundColor Red
-            Write-Host ('  Actual   SourcePattern={0}' -f (ConvertTo-WTDisplayValue -Value $actual.SourcePattern)) -ForegroundColor Red
+            Write-Host ('  Actual   SourcePattern={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ParseSource)) -ForegroundColor Red
+            Write-Host ('  Expected CurrentServiceMatched={0}' -f (ConvertTo-WTYesNoUnknown -Value $test.ExpectedCurrentServiceMatched)) -ForegroundColor Red
+            Write-Host ('  Actual   CurrentServiceMatched={0}' -f (ConvertTo-WTYesNoUnknown -Value $actual.CurrentServiceMatched)) -ForegroundColor Red
+            Write-Host ('  Expected CurrentState={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedCurrentState)) -ForegroundColor Red
+            Write-Host ('  Actual   CurrentState={0}' -f (ConvertTo-WTDisplayValue -Value $actual.CurrentState)) -ForegroundColor Red
         }
 
         $results += [pscustomobject]@{
             Name = $test.Name
             Passed = $pass
             ExpectedProcessName = $test.ExpectedProcessName
-            ActualProcessName = $actual.ProcessName
+            ActualProcessName = $actual.ServiceName
             ExpectedProcessPath = $test.ExpectedProcessPath
-            ActualProcessPath = $actual.ProcessPath
+            ActualProcessPath = $actual.ServiceFileName
             ExpectedSourcePattern = $test.ExpectedSourcePattern
-            ActualSourcePattern = $actual.SourcePattern
+            ActualSourcePattern = $actual.ParseSource
+            ExpectedCurrentServiceMatched = $test.ExpectedCurrentServiceMatched
+            ActualCurrentServiceMatched = $actual.CurrentServiceMatched
+            ExpectedCurrentState = $test.ExpectedCurrentState
+            ActualCurrentState = $actual.CurrentState
         }
     }
 
@@ -6450,6 +6615,19 @@ function Invoke-WTServiceEventParserSelfTest {
     [CmdletBinding()]
     param()
 
+    $serviceInventory = @(
+        [pscustomobject]@{
+            Name = 'PDF24'
+            DisplayName = 'PDF24'
+            State = 'Running'
+            PathName = '"C:\Program Files\PDF24\pdf24.exe" -service'
+            AgentName = 'PDF24'
+            Vendor = 'PDF24'
+            Category = 'Printing/PDF'
+            Capabilities = @('Printing', 'PDF')
+        }
+    )
+
     $tests = @(
         [pscustomobject]@{
             Name = 'Spanish 7031'
@@ -6468,6 +6646,8 @@ El servicio PDF24 terminó inesperadamente. Esto se ha repetido 1 veces. Se real
             ExpectedFailureCount = 1
             ExpectedParseLanguage = 'es'
             ExpectedRawParseStatus = 'Parsed'
+            ExpectedCurrentServiceMatched = $true
+            ExpectedCurrentState = 'Running'
         },
         [pscustomobject]@{
             Name = 'Spanish 7031 multiline'
@@ -6488,6 +6668,8 @@ Se realizará la siguiente acción correctora en 60000 milisegundos: Reiniciar e
             ExpectedFailureCount = 1
             ExpectedParseLanguage = 'es'
             ExpectedRawParseStatus = 'Parsed'
+            ExpectedCurrentServiceMatched = $true
+            ExpectedCurrentState = 'Running'
         },
         [pscustomobject]@{
             Name = 'Spanish 7045'
@@ -6512,6 +6694,8 @@ Cuenta de servicio:  LocalSystem
             ExpectedFailureCount = $null
             ExpectedParseLanguage = 'es'
             ExpectedRawParseStatus = 'Parsed'
+            ExpectedCurrentServiceMatched = $false
+            ExpectedCurrentState = $null
         },
         [pscustomobject]@{
             Name = 'English 7031'
@@ -6530,6 +6714,8 @@ The PDF24 service terminated unexpectedly. It has done this 1 time(s). The follo
             ExpectedFailureCount = 1
             ExpectedParseLanguage = 'en'
             ExpectedRawParseStatus = 'Parsed'
+            ExpectedCurrentServiceMatched = $true
+            ExpectedCurrentState = 'Running'
         },
         [pscustomobject]@{
             Name = 'English 7045'
@@ -6554,6 +6740,8 @@ Service Account: LocalSystem
             ExpectedFailureCount = $null
             ExpectedParseLanguage = 'en'
             ExpectedRawParseStatus = 'Parsed'
+            ExpectedCurrentServiceMatched = $false
+            ExpectedCurrentState = $null
         }
     )
 
@@ -6561,7 +6749,18 @@ Service Account: LocalSystem
     $failed = $false
 
     foreach ($test in $tests) {
-        $actual = Get-WTServiceEventFields -Event $test.Event
+        $actual = ConvertTo-WTServiceEventRecord -Event ([pscustomobject]@{
+            Id = $test.Event.Id
+            ProviderName = 'Service Control Manager'
+            LogName = 'System'
+            Level = 2
+            LevelDisplayName = 'Error'
+            TimeCreated = Get-Date
+            Message = $test.Event.Message
+            MessageShort = $test.Event.MessageShort
+            MachineName = $env:COMPUTERNAME
+            EventProperties = @()
+        }) -ServiceInventory $serviceInventory
         $pass = (
             $actual.ServiceName -eq $test.ExpectedServiceName -and
             $actual.ServiceFileName -eq $test.ExpectedServiceFileName -and
@@ -6570,7 +6769,9 @@ Service Account: LocalSystem
             $actual.RecoveryAction -eq $test.ExpectedRecoveryAction -and
             $actual.FailureCount -eq $test.ExpectedFailureCount -and
             $actual.ParseLanguage -eq $test.ExpectedParseLanguage -and
-            $actual.RawParseStatus -eq $test.ExpectedRawParseStatus
+            $actual.RawParseStatus -eq $test.ExpectedRawParseStatus -and
+            $actual.CurrentServiceMatched -eq $test.ExpectedCurrentServiceMatched -and
+            $actual.CurrentState -eq $test.ExpectedCurrentState
         )
 
         if ($pass) {
@@ -6593,6 +6794,10 @@ Service Account: LocalSystem
             Write-Host ('  Actual   RecoveryAction={0}' -f (ConvertTo-WTDisplayValue -Value $actual.RecoveryAction)) -ForegroundColor Red
             Write-Host ('  Expected RawParseStatus={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedRawParseStatus)) -ForegroundColor Red
             Write-Host ('  Actual   RawParseStatus={0}' -f (ConvertTo-WTDisplayValue -Value $actual.RawParseStatus)) -ForegroundColor Red
+            Write-Host ('  Expected CurrentServiceMatched={0}' -f (ConvertTo-WTYesNoUnknown -Value $test.ExpectedCurrentServiceMatched)) -ForegroundColor Red
+            Write-Host ('  Actual   CurrentServiceMatched={0}' -f (ConvertTo-WTYesNoUnknown -Value $actual.CurrentServiceMatched)) -ForegroundColor Red
+            Write-Host ('  Expected CurrentState={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedCurrentState)) -ForegroundColor Red
+            Write-Host ('  Actual   CurrentState={0}' -f (ConvertTo-WTDisplayValue -Value $actual.CurrentState)) -ForegroundColor Red
         }
 
         $results += [pscustomobject]@{
@@ -6612,6 +6817,10 @@ Service Account: LocalSystem
             ActualRecoveryAction = $actual.RecoveryAction
             ExpectedRawParseStatus = $test.ExpectedRawParseStatus
             ActualRawParseStatus = $actual.RawParseStatus
+            ExpectedCurrentServiceMatched = $test.ExpectedCurrentServiceMatched
+            ActualCurrentServiceMatched = $actual.CurrentServiceMatched
+            ExpectedCurrentState = $test.ExpectedCurrentState
+            ActualCurrentState = $actual.CurrentState
         }
     }
 
@@ -6781,6 +6990,14 @@ function ConvertTo-WTEventRecord {
         AffectedPath    = $processInfo.ProcessPath
         ProcessSourcePattern = $processInfo.SourcePattern
         WerEventName    = $werEventName
+        EventProperties = @(
+            try {
+                @($EventRecord.Properties | ForEach-Object { $_.Value })
+            }
+            catch {
+                @()
+            }
+        )
     }
 }
 
