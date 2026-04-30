@@ -52,3 +52,4 @@
 - Hardened the services and agents module to parse localized SCM events better, separate likely-normal auto-stopped services, classify managed remote tools explicitly, and prioritize NComputing/vSpace over Action1 when correlating `mxdhcp.exe`.
 - Bumped script version to `0.6.1` after tightening services correlation, legacy agent detection, and service-event parsing.
 - Fixed a `ServicesRules` runtime regression caused by an inline `if` expression inside `-f` formatting, restoring normal service-rule execution.
+- Bumped script version to `0.6.2` after the services hotfix and parser adjustments.

@@ -18,7 +18,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.6.1'
+$script:WTVersion = '0.6.2'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -1229,9 +1229,9 @@ function Export-WTMarkdownReport {
         [void]$sb.AppendLine('')
         [void]$sb.AppendLine('| Service | DisplayName | StartMode | State | Path |')
         [void]$sb.AppendLine('| --- | --- | --- | --- | --- |')
-        $autoStoppedRows = @($services.AutomaticStoppedServices | Select-Object -First 15)
+        $autoStoppedRows = @($services.AutomaticStoppedRelevant | Select-Object -First 15)
         if ($autoStoppedRows.Count -eq 0) {
-            [void]$sb.AppendLine('No relevant automatic services stopped.')
+            [void]$sb.AppendLine('No relevant automatic stopped services detected.')
         }
         else {
             foreach ($svc in $autoStoppedRows) {
@@ -3192,7 +3192,18 @@ function Get-WTServiceEventFields {
         [psobject]$Event
     )
 
-    $text = @($Event.Message, $Event.MessageShort) -join "`n"
+    $messageText = if ($null -eq $Event.Message) { '' } else { [string]$Event.Message }
+    $messageText = $messageText -replace "(\r\n|\n|\r)", " "
+    $messageText = $messageText -replace "\s+", " "
+    $messageText = $messageText.Trim()
+    $messageShortText = if ($null -eq $Event.MessageShort) { '' } else { [string]$Event.MessageShort }
+    $messageShortText = $messageShortText -replace "(\r\n|\n|\r)", " "
+    $messageShortText = $messageShortText -replace "\s+", " "
+    $messageShortText = $messageShortText.Trim()
+    $text = @()
+    if (-not [string]::IsNullOrWhiteSpace($messageText)) { $text += $messageText }
+    if (-not [string]::IsNullOrWhiteSpace($messageShortText) -and $messageShortText -ne $messageText) { $text += $messageShortText }
+    $text = $text -join ' '
     $serviceName = $null
     $serviceFileName = $null
     $serviceAccount = $null
@@ -3209,7 +3220,7 @@ function Get-WTServiceEventFields {
         7032 { $serviceEventType = 'RecoveryAction' }
     }
 
-    $lines = @($text -split "`r?`n")
+    $lines = @($Event.Message, $Event.MessageShort) -join "`n" -split "`r?`n"
     $lineCount = 0
     foreach ($line in $lines) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -3245,33 +3256,33 @@ function Get-WTServiceEventFields {
         }
 
         if (-not $failureCount) {
-            if ($trimmed -match '(?i)^\s*Esto se ha repetido\s+(?<count>\d+)\s+veces?\.?') {
+            if ($trimmed -match '(?i)\bEsto se ha repetido\s+(?<count>\d+)\s+ve(?:z|ces)\b') {
                 $parseLanguage = 'es'
                 $failureCount = [int]$matches.count
             }
-            elseif ($trimmed -match '(?i)^\s*It has done this\s+(?<count>\d+)\s+time\(s\)\.?') {
+            elseif ($trimmed -match '(?i)\bIt has done this\s+(?<count>\d+)\s+time\(s\)\b') {
                 if ($parseLanguage -eq 'unknown') { $parseLanguage = 'en' }
                 $failureCount = [int]$matches.count
             }
         }
 
         if (-not $serviceName) {
-            if ($trimmed -match '(?i)^\s*El servicio\s+(?<name>.+?)\s+termin[oó] inesperadamente\.?$') {
+            if ($trimmed -match '(?i)\bEl servicio\s+(?<name>.+?)\s+termin[oó]\s+inesperadamente\b') {
                 $parseLanguage = 'es'
                 $serviceName = $matches.name.Trim()
             }
-            elseif ($trimmed -match '(?i)^\s*The\s+(?<name>.+?)\s+service\s+terminated unexpectedly\.?$') {
+            elseif ($trimmed -match '(?i)\bThe\s+(?<name>.+?)\s+service\s+terminated unexpectedly\b') {
                 if ($parseLanguage -eq 'unknown') { $parseLanguage = 'en' }
                 $serviceName = $matches.name.Trim()
             }
         }
 
         if (-not $recoveryAction) {
-            if ($trimmed -match '(?i)^\s*Se realizará la siguiente acción correctora en\s+\d+\s+milisegundos:\s*(?<action>[^\r\n]+)$') {
+            if ($trimmed -match '(?i)\bacción correctora en\s+\d+\s+milisegundos:\s*(?<action>.+?)(?:\.|$)') {
                 $parseLanguage = 'es'
                 $recoveryAction = $matches.action.Trim()
             }
-            elseif ($trimmed -match '(?i)^\s*The following corrective action will be taken in\s+\d+\s+milliseconds:\s*(?<action>[^\r\n]+)$') {
+            elseif ($trimmed -match '(?i)\bThe following corrective action will be taken in\s+\d+\s+milliseconds:\s*(?<action>.+?)(?:\.|$)') {
                 if ($parseLanguage -eq 'unknown') { $parseLanguage = 'en' }
                 $recoveryAction = $matches.action.Trim()
             }
@@ -3282,7 +3293,15 @@ function Get-WTServiceEventFields {
         }
     }
 
-    if ($serviceName -and ($serviceFileName -or $serviceAccount -or $startType -or $recoveryAction -or $failureCount)) {
+    if ($Event.Id -in @(7031, 7034)) {
+        if ($serviceName -and $failureCount -ne $null) {
+            $rawParseStatus = 'Parsed'
+        }
+        elseif ($serviceName -or $serviceFileName -or $serviceAccount -or $startType -or $recoveryAction -or $failureCount) {
+            $rawParseStatus = 'Partial'
+        }
+    }
+    elseif ($serviceName -and ($serviceFileName -or $serviceAccount -or $startType -or $recoveryAction -or $failureCount)) {
         $rawParseStatus = 'Parsed'
     }
     elseif ($serviceName -or $serviceFileName -or $serviceAccount -or $startType -or $recoveryAction -or $failureCount) {
@@ -3817,6 +3836,10 @@ function ConvertTo-WTNormalizedServicesInfo {
         '^(?i)gupdatem$',
         '^(?i)googleupdater',
         '^(?i)cometupdater',
+        '^(?i)appxsvc$',
+        '^(?i)clipsvc$',
+        '^(?i)appreadiness$',
+        '^(?i)staterepository$',
         '^(?i)mapsbroker$',
         '^(?i)diagtrack$',
         '^(?i)sppsvc$',
@@ -4067,7 +4090,7 @@ function ConvertTo-WTNormalizedServicesInfo {
         $servicesHealthSummary = 'Critical Windows services not running'
     }
     elseif ($serviceFailureEvents.Count -gt 0) {
-        $servicesHealthSummary = 'Recent service failure events detected'
+        $servicesHealthSummary = if ($criticalNotRunning.Count -gt 0) { 'Critical Windows services not running' } elseif (@($serviceFailureEvents | Where-Object { $_.ServiceName -and $_.ServiceName -match '(?i)PDF24' }).Count -gt 0) { 'Recent non-critical service failure events detected' } else { 'Recent service failure events detected' }
     }
     elseif ($automaticStoppedRelevant.Count -gt 0) {
         $servicesHealthSummary = 'Automatic services stopped'
@@ -4079,7 +4102,7 @@ function ConvertTo-WTNormalizedServicesInfo {
     $corporateAgentsSummary = 'No known corporate agents detected'
     if ($corporateAgents.Count -gt 0) {
         if ($serviceFailureEvents.Count -gt 0) {
-            $corporateAgentsSummary = 'Corporate agents detected with recent service failures'
+            $corporateAgentsSummary = 'Corporate agents detected with recent non-critical service failures'
         }
         else {
             $corporateAgentsSummary = 'Corporate agents detected'
@@ -6441,7 +6464,27 @@ El servicio PDF24 terminó inesperadamente. Esto se ha repetido 1 veces. Se real
             ExpectedServiceFileName = $null
             ExpectedServiceAccount = $null
             ExpectedStartType = $null
-            ExpectedRecoveryAction = 'Reiniciar el servicio.'
+            ExpectedRecoveryAction = 'Reiniciar el servicio'
+            ExpectedFailureCount = 1
+            ExpectedParseLanguage = 'es'
+            ExpectedRawParseStatus = 'Parsed'
+        },
+        [pscustomobject]@{
+            Name = 'Spanish 7031 multiline'
+            Event = [pscustomobject]@{
+                Id = 7031
+                Message = @'
+El servicio PDF24 terminó inesperadamente.
+Esto se ha repetido 1 veces.
+Se realizará la siguiente acción correctora en 60000 milisegundos: Reiniciar el servicio.
+'@
+                MessageShort = $null
+            }
+            ExpectedServiceName = 'PDF24'
+            ExpectedServiceFileName = $null
+            ExpectedServiceAccount = $null
+            ExpectedStartType = $null
+            ExpectedRecoveryAction = 'Reiniciar el servicio'
             ExpectedFailureCount = 1
             ExpectedParseLanguage = 'es'
             ExpectedRawParseStatus = 'Parsed'
@@ -6483,7 +6526,7 @@ The PDF24 service terminated unexpectedly. It has done this 1 time(s). The follo
             ExpectedServiceFileName = $null
             ExpectedServiceAccount = $null
             ExpectedStartType = $null
-            ExpectedRecoveryAction = 'Restart the service.'
+            ExpectedRecoveryAction = 'Restart the service'
             ExpectedFailureCount = 1
             ExpectedParseLanguage = 'en'
             ExpectedRawParseStatus = 'Parsed'
@@ -6544,6 +6587,10 @@ Service Account: LocalSystem
             Write-Host ('  Actual   ServiceAccount={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ServiceAccount)) -ForegroundColor Red
             Write-Host ('  Expected ParseLanguage={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedParseLanguage)) -ForegroundColor Red
             Write-Host ('  Actual   ParseLanguage={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ParseLanguage)) -ForegroundColor Red
+            Write-Host ('  Expected FailureCount={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedFailureCount)) -ForegroundColor Red
+            Write-Host ('  Actual   FailureCount={0}' -f (ConvertTo-WTDisplayValue -Value $actual.FailureCount)) -ForegroundColor Red
+            Write-Host ('  Expected RecoveryAction={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedRecoveryAction)) -ForegroundColor Red
+            Write-Host ('  Actual   RecoveryAction={0}' -f (ConvertTo-WTDisplayValue -Value $actual.RecoveryAction)) -ForegroundColor Red
             Write-Host ('  Expected RawParseStatus={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedRawParseStatus)) -ForegroundColor Red
             Write-Host ('  Actual   RawParseStatus={0}' -f (ConvertTo-WTDisplayValue -Value $actual.RawParseStatus)) -ForegroundColor Red
         }
@@ -6559,6 +6606,10 @@ Service Account: LocalSystem
             ActualServiceAccount = $actual.ServiceAccount
             ExpectedParseLanguage = $test.ExpectedParseLanguage
             ActualParseLanguage = $actual.ParseLanguage
+            ExpectedFailureCount = $test.ExpectedFailureCount
+            ActualFailureCount = $actual.FailureCount
+            ExpectedRecoveryAction = $test.ExpectedRecoveryAction
+            ActualRecoveryAction = $actual.RecoveryAction
             ExpectedRawParseStatus = $test.ExpectedRawParseStatus
             ActualRawParseStatus = $actual.RawParseStatus
         }
