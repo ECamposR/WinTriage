@@ -45,3 +45,4 @@
 - Bumped script version to `0.5.0` after integrating the security posture diagnostics module.
 - Reduced false positives in Defender and Windows Update diagnostics by suppressing expected `Get-MpPreference` failures when Defender is passive or a third-party AV is active, deduplicating normalized security products and relaxing service rules for BITS in Manual/Stopped state.
 - Bumped script version to `0.5.1` after tuning the security and update hygiene rules.
+- Corrected the runtime banner/version constant so the console now reports `0.5.1` instead of `0.5.0`.
