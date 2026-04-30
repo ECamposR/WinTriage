@@ -17,3 +17,5 @@
 - Updated report naming consistency and metadata/output formatting so repeated runs do not collide and build text is always populated or marked unknown.
 - Added first real System/Application event module with CSV export, event overview Markdown, and initial shutdown/bugcheck/service/app-crash findings plus basic correlations.
 - Refined event classification to reduce WER false positives, added process extraction and crash summaries, and made Markdown counts more robust.
+- Hotfixed a PowerShell parser error in event sorting and bumped the script version to `0.3.2`.
+- Replaced invalid `Sort-Object` syntax with PowerShell 5.1-compatible property hashtables to keep the script parseable.

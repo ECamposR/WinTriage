@@ -15,7 +15,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.3.0'
+$script:WTVersion = '0.3.2'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -2216,7 +2216,15 @@ function Invoke-WTEventRules {
     }
 
     if ($nonCriticalWerCount -ge 5) {
-        $werNames = @($events.NonCriticalWerEvents | ForEach-Object { if ($_.WerEventName) { $_.WerEventName } else { $_.MessageShort } } | Where-Object { $_ } | Group-Object | Sort-Object -Property Count -Descending, Name | Select-Object -First 5 | ForEach-Object { '{0}({1})' -f $_.Name, $_.Count })
+        $werNames = @(
+            $events.NonCriticalWerEvents |
+                ForEach-Object { if ($_.WerEventName) { $_.WerEventName } else { $_.MessageShort } } |
+                Where-Object { $_ } |
+                Group-Object |
+                Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true } |
+                Select-Object -First 5 |
+                ForEach-Object { '{0}({1})' -f $_.Name, $_.Count }
+        )
         $latestWer = @($events.NonCriticalWerEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
         Add-WTFinding -Report $Report -Id 'WT-EVT-WER-NONCRITICAL' -Category 'Events' -Severity 'Info' -Title 'Non-critical Windows Error Reporting events detected' -Description 'Windows logged multiple non-critical WER reports that do not appear to be application crashes.' -Evidence @("Count=$nonCriticalWerCount", ('Names={0}' -f ($werNames -join ', ')), ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latestWer[0].TimeCreated))) -Recommendation 'Review only if users report symptoms related to the affected application.' -Source 'Invoke-WTEventRules' -Status 'Info'
     }
