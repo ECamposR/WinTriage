@@ -21,3 +21,5 @@
 - Replaced invalid `Sort-Object` syntax with PowerShell 5.1-compatible property hashtables to keep the script parseable.
 - Refined event process extraction for Spanish Application Error 1000 messages, stabilized Markdown `Exit code`, and reprioritized recent important events away from non-critical WER noise.
 - Tightened Spanish `Application Error 1000` parsing, added an internal warning when process extraction fails, and reduced WER noise in `Recent Important Events`.
+- Restored APPCRASH/Application Error enrichment for `AffectedProcess`, `AffectedPath`, and `ProcessSourcePattern`, then rebalanced crash summaries and event prioritization.
+- Repaired regression in APPCRASH/Application Error parsing so enriched process fields are populated again and crash summaries no longer collapse to `Unknown`.

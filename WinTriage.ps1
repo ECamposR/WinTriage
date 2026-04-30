@@ -15,7 +15,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.3.4'
+$script:WTVersion = '0.3.5'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -1720,6 +1720,119 @@ function Get-WTEventKey {
     return ('{0}|{1}|{2}|{3}|{4}' -f $timeText, $Event.LogName, $Event.ProviderName, $Event.Id, $Event.MessageShort)
 }
 
+function Normalize-WTProcessName {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Value,
+
+        [switch]$RequireExecutable
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    $text = ($text -split '[\r\n]+' | Select-Object -First 1)
+    if ($text -match ',') {
+        $commaParts = $text -split ',', 2
+        if ($commaParts.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($commaParts[0])) {
+            $text = $commaParts[0]
+        }
+    }
+    $text = $text.Trim().Trim('"').TrimEnd(',').Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    if ($text -match '^[A-Za-z]:\\|^\\\\|[\\/]' ) {
+        try {
+            $text = [System.IO.Path]::GetFileName($text)
+        }
+        catch {
+            $text = $null
+        }
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return $null
+        }
+        $text = $text.Trim().Trim('"').TrimEnd(',').Trim()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    if ($text -match '^[A-Fa-f0-9]{8}$') {
+        return $null
+    }
+
+    if ($RequireExecutable.IsPresent -and $text -notmatch '\.exe$') {
+        return $null
+    }
+
+    if (-not $RequireExecutable.IsPresent -and $text -notmatch '\.[A-Za-z0-9]{2,4}$' -and $text -notmatch '\.exe$') {
+        return $null
+    }
+
+    return $text
+}
+
+function Normalize-WTProcessPath {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    $text = ($text -split '[\r\n]+' | Select-Object -First 1)
+    if ($text -match ',') {
+        $commaParts = $text -split ',', 2
+        if ($commaParts.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($commaParts[0])) {
+            $text = $commaParts[0]
+        }
+    }
+    $cutMarkers = @(
+        'Ruta de módulo con errores:',
+        'Id\. de informe:',
+        'Nombre completo del paquete con errores:',
+        'Faulting module path:',
+        'Report Id:',
+        'Faulting package full name:',
+        'Faulting application path:',
+        'Ruta de aplicación con errores:'
+    )
+    foreach ($marker in $cutMarkers) {
+        if ($text -match $marker) {
+            $text = [regex]::Split($text, $marker)[0]
+        }
+    }
+
+    $text = $text.Trim().Trim('"').TrimEnd(',').Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    if ($text -match '^[A-Za-z]:\\|^\\\\') {
+        return $text
+    }
+
+    return $null
+}
+
 function Get-WTWerEventName {
     [CmdletBinding()]
     param(
@@ -1747,7 +1860,16 @@ function Get-WTEventProcessName {
         [string]$Message,
 
         [AllowNull()]
-        [string]$MessageShort
+        [string]$MessageShort,
+
+        [AllowNull()]
+        [string]$ProviderName,
+
+        [AllowNull()]
+        [object]$Id,
+
+        [AllowNull()]
+        [string]$WerEventName
     )
 
     $texts = @()
@@ -1766,34 +1888,82 @@ function Get-WTEventProcessName {
         }
     }
 
+    $crashSignal = $false
+    if ($WerEventName -and $WerEventName -match '^(APPCRASH|BEX|CLR20r3|MoAppCrash)$') {
+        $crashSignal = $true
+    }
+    elseif (($ProviderName -eq 'Windows Error Reporting' -and $Id -eq 1001) -and (
+        (-not [string]::IsNullOrWhiteSpace($Message) -and $Message -match '(?im)^\s*(Nombre de evento|Event Name):\s*(APPCRASH|BEX|CLR20r3|MoAppCrash)\b') -or
+        (-not [string]::IsNullOrWhiteSpace($MessageShort) -and $MessageShort -match '(?im)^\s*(Nombre de evento|Event Name):\s*(APPCRASH|BEX|CLR20r3|MoAppCrash)\b')
+    )) {
+        $crashSignal = $true
+    }
+
     $patterns = @(
-        [pscustomobject]@{ Name = 'SpanishFaultingApplicationName'; Process = 'Nombre de aplicación con errores:\s*([^,\r\n]+)'; Path = $null; RequiresExecutableLike = $false },
-        [pscustomobject]@{ Name = 'SpanishFaultingApplicationPath'; Process = $null; Path = 'Ruta de aplicación con errores:\s*([^\r\n]+)'; RequiresExecutableLike = $false },
-        [pscustomobject]@{ Name = 'SpanishFaultingModulePath'; Process = $null; Path = 'Ruta de módulo con errores:\s*([^\r\n]+)'; RequiresExecutableLike = $false },
-        [pscustomobject]@{ Name = 'EnglishFaultingApplicationName'; Process = 'Faulting application name:\s*([^,\r\n]+)'; Path = $null; RequiresExecutableLike = $false },
-        [pscustomobject]@{ Name = 'EnglishFaultingApplicationPath'; Process = $null; Path = 'Faulting application path:\s*([^\r\n]+)'; RequiresExecutableLike = $false },
-        [pscustomobject]@{ Name = 'EnglishFaultingModulePath'; Process = $null; Path = 'Faulting module path:\s*([^\r\n]+)'; RequiresExecutableLike = $false }
+        [pscustomobject]@{ Name = 'SpanishFaultingApplicationName'; Type = 'Name'; Regex = 'Nombre de aplicación con errores:\s*([^,\r\n]+)'; RequireExecutable = $true },
+        [pscustomobject]@{ Name = 'SpanishFaultingApplicationPath'; Type = 'Path'; Regex = 'Ruta de aplicación con errores:\s*([^\r\n]+)'; RequireExecutable = $false },
+        [pscustomobject]@{ Name = 'SpanishFaultingModulePath'; Type = 'Path'; Regex = 'Ruta de módulo con errores:\s*([^\r\n]+)'; RequireExecutable = $false },
+        [pscustomobject]@{ Name = 'EnglishFaultingApplicationName'; Type = 'Name'; Regex = 'Faulting application name:\s*([^,\r\n]+)'; RequireExecutable = $true },
+        [pscustomobject]@{ Name = 'EnglishFaultingApplicationPath'; Type = 'Path'; Regex = 'Faulting application path:\s*([^\r\n]+)'; RequireExecutable = $false },
+        [pscustomobject]@{ Name = 'EnglishFaultingModulePath'; Type = 'Path'; Regex = 'Faulting module path:\s*([^\r\n]+)'; RequireExecutable = $false }
     )
 
     $processName = $null
     $processPath = $null
     $sourcePattern = $null
 
-    foreach ($textInfo in $texts) {
-        $text = $textInfo
-
+    foreach ($text in $texts) {
         foreach ($pattern in $patterns) {
-            if (-not $processName -and $pattern.Process -and $text -match $pattern.Process) {
-                $processName = ($Matches[1].Trim()).TrimEnd(',').Trim()
-                if (-not $sourcePattern) {
-                    $sourcePattern = $pattern.Name
+            if (-not $processName -and $text -match $pattern.Regex) {
+                $candidate = Normalize-WTProcessName -Value $Matches[1] -RequireExecutable:([bool]$pattern.RequireExecutable)
+                if ($candidate) {
+                    $processName = $candidate
+                    if (-not $sourcePattern) {
+                        $sourcePattern = $pattern.Name
+                    }
                 }
             }
+        }
 
-            if (-not $processPath -and $pattern.Path -and $text -match $pattern.Path) {
-                $processPath = ($Matches[1].Trim()).TrimEnd(',').Trim()
-                if (-not $sourcePattern) {
-                    $sourcePattern = $pattern.Name
+        foreach ($pattern in $patterns) {
+            if (-not $processPath -and $text -match $pattern.Regex) {
+                $candidatePath = Normalize-WTProcessPath -Value $Matches[1]
+                if ($candidatePath) {
+                    $processPath = $candidatePath
+                    if (-not $sourcePattern) {
+                        $sourcePattern = $pattern.Name
+                    }
+                }
+            }
+        }
+
+        if ($processName -and $processPath) {
+            break
+        }
+    }
+
+    if (-not $processName -and $processPath) {
+        try {
+            $processName = Normalize-WTProcessName -Value ([System.IO.Path]::GetFileName($processPath))
+        }
+        catch {
+            $processName = $null
+        }
+    }
+
+    if (-not $processName -and $crashSignal) {
+        foreach ($text in $texts) {
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                continue
+            }
+            if ($text -match '(?im)^\s*P1:\s*([^\r\n]+)') {
+                $candidate = Normalize-WTProcessName -Value $Matches[1] -RequireExecutable
+                if ($candidate) {
+                    $processName = $candidate
+                    if (-not $sourcePattern) {
+                        $sourcePattern = 'WerP1CrashExecutable'
+                    }
+                    break
                 }
             }
         }
@@ -1801,7 +1971,8 @@ function Get-WTEventProcessName {
 
     if (-not $processName -and $processPath) {
         try {
-            $processName = [System.IO.Path]::GetFileName($processPath)
+            $derivedName = [System.IO.Path]::GetFileName($processPath)
+            $processName = Normalize-WTProcessName -Value $derivedName
         }
         catch {
             $processName = $null
@@ -1839,8 +2010,8 @@ function ConvertTo-WTEventRecord {
     }
 
     $messageShort = ConvertTo-WTEventMessageShort -Message $message
-    $processInfo = Get-WTEventProcessName -Message $message -MessageShort $messageShort
     $werEventName = Get-WTWerEventName -Message $message
+    $processInfo = Get-WTEventProcessName -Message $message -MessageShort $messageShort -ProviderName $EventRecord.ProviderName -Id $EventRecord.Id -WerEventName $werEventName
 
     return [pscustomobject]@{
         TimeCreated     = $timeCreated
@@ -2029,32 +2200,38 @@ function ConvertTo-WTNormalizedEventInfo {
     $serviceFailureIds = @(7000, 7001, 7009, 7011, 7022, 7023, 7024, 7031, 7034)
     $serviceFailureEvents = @($systemEvents | Where-Object { $_.ProviderName -eq 'Service Control Manager' -and $_.Id -in $serviceFailureIds })
     $serviceInstallEvents = @($systemEvents | Where-Object { $_.ProviderName -eq 'Service Control Manager' -and $_.Id -eq 7045 })
-    $applicationErrorEvents = @($applicationEvents | Where-Object { $_.ProviderName -eq 'Application Error' -and $_.Id -eq 1000 })
-    $windowsErrorReportingEvents = @($applicationEvents | Where-Object { $_.ProviderName -eq 'Windows Error Reporting' -and $_.Id -eq 1001 })
-    $nonCriticalWerEvents = @($windowsErrorReportingEvents | Where-Object {
-        $name = $_.WerEventName
-        if ([string]::IsNullOrWhiteSpace($name)) { $name = $_.MessageShort }
-        -not ($name -match 'APPCRASH|BEX|CLR20r3|MoAppCrash|BugCheck')
-    })
-    $applicationCrashEvents = @(
-        $applicationErrorEvents +
-        ($windowsErrorReportingEvents | Where-Object {
+        $applicationErrorEvents = @($applicationEvents | Where-Object { $_.ProviderName -eq 'Application Error' -and $_.Id -eq 1000 })
+        $windowsErrorReportingEvents = @($applicationEvents | Where-Object { $_.ProviderName -eq 'Windows Error Reporting' -and $_.Id -eq 1001 })
+        $nonCriticalWerEvents = @($windowsErrorReportingEvents | Where-Object {
             $name = $_.WerEventName
             if ([string]::IsNullOrWhiteSpace($name)) { $name = $_.MessageShort }
-            $name -match 'APPCRASH|BEX|CLR20r3|MoAppCrash'
+            -not ($name -match 'APPCRASH|BEX|CLR20r3|MoAppCrash|BugCheck')
         })
-    )
-    $applicationCrashEvents = @($applicationCrashEvents | Sort-Object -Property TimeCreated -Descending)
-    $applicationCrashSummaryByProcess = @(
-        $applicationCrashEvents |
+        $applicationCrashEvents = @(
+            $applicationErrorEvents +
+            ($windowsErrorReportingEvents | Where-Object {
+                $name = $_.WerEventName
+                if ([string]::IsNullOrWhiteSpace($name)) { $name = $_.MessageShort }
+                $name -match 'APPCRASH|BEX|CLR20r3|MoAppCrash'
+            })
+        )
+        $applicationCrashEvents = @($applicationCrashEvents | Sort-Object -Property TimeCreated -Descending)
+        $applicationCrashSummaryByProcess = @(
+            $applicationCrashEvents |
             ForEach-Object {
                 $summaryProcess = $_.AffectedProcess
                 if ([string]::IsNullOrWhiteSpace($summaryProcess) -and $_.AffectedPath) {
                     try {
-                        $summaryProcess = [System.IO.Path]::GetFileName($_.AffectedPath)
+                        $summaryProcess = Normalize-WTProcessName -Value ([System.IO.Path]::GetFileName($_.AffectedPath))
                     }
                     catch {
                         $summaryProcess = $null
+                    }
+                }
+                if ([string]::IsNullOrWhiteSpace($summaryProcess)) {
+                    $fallbackProcessInfo = Get-WTEventProcessName -Message $_.Message -MessageShort $_.MessageShort -ProviderName $_.ProviderName -Id $_.Id -WerEventName $_.WerEventName
+                    if ($fallbackProcessInfo -and -not [string]::IsNullOrWhiteSpace($fallbackProcessInfo.ProcessName)) {
+                        $summaryProcess = $fallbackProcessInfo.ProcessName
                     }
                 }
                 if ([string]::IsNullOrWhiteSpace($summaryProcess)) {
@@ -2109,30 +2286,15 @@ function ConvertTo-WTNormalizedEventInfo {
     $recentCriticalEvents = @($allEvents | Where-Object { $_.LevelDisplayName -in @('Critical', 'Error') } | Select-Object -First 20)
     $recentWarningEvents = @($allEvents | Where-Object { $_.LevelDisplayName -eq 'Warning' } | Select-Object -First 20)
 
-    $specialEventKeys = New-Object 'System.Collections.Generic.HashSet[string]'
-    foreach ($evt in @($unexpectedShutdownEvents + $bugCheckEvents + $serviceFailureEvents + $applicationCrashEvents + $serviceInstallEvents + $nonCriticalWerEvents)) {
-        $key = Get-WTEventKey -Event $evt
-        if ($key) {
-            [void]$specialEventKeys.Add($key)
-        }
-    }
-
-    $genericCriticalErrorEvents = @(
-        $allEvents |
-            Where-Object {
-                ($_.LevelDisplayName -in @('Critical', 'Error') -or $_.Level -in @(1, 2)) -and
-                -not $specialEventKeys.Contains((Get-WTEventKey -Event $_))
-            } |
-            Sort-Object -Property TimeCreated -Descending |
-            Select-Object -First 20
-    )
+    $applicationErrorCrashEventsForImportant = @($applicationCrashEvents | Where-Object { $_.ProviderName -eq 'Application Error' } | Sort-Object -Property TimeCreated -Descending)
+    $werAppCrashEventsForImportant = @($applicationCrashEvents | Where-Object { $_.ProviderName -eq 'Windows Error Reporting' -and ($_.WerEventName -eq 'APPCRASH' -or $_.Message -match '(?im)^\s*(Nombre de evento|Event Name):\s*APPCRASH\b') } | Sort-Object -Property TimeCreated -Descending)
 
     $recentImportantEvents = @()
     $recentImportantEvents += @($unexpectedShutdownEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 20)
     $recentImportantEvents += @($bugCheckEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 20)
-    $recentImportantEvents += @($genericCriticalErrorEvents)
     $recentImportantEvents += @($serviceFailureEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 20)
-    $recentImportantEvents += @($applicationCrashEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 20)
+    $recentImportantEvents += @($applicationErrorCrashEventsForImportant | Select-Object -First 20)
+    $recentImportantEvents += @($werAppCrashEventsForImportant | Select-Object -First 20)
     $recentImportantEvents += @($serviceInstallEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 20)
 
     if (@($recentImportantEvents).Count -lt 20) {
@@ -2151,7 +2313,7 @@ function ConvertTo-WTNormalizedEventInfo {
             $uniqueImportantEvents += $evt
         }
     }
-    $recentImportantEvents = @($uniqueImportantEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 20)
+    $recentImportantEvents = @($uniqueImportantEvents | Select-Object -First 20)
 
     return [pscustomobject]@{
         WindowStart                 = $EventInfo.WindowStart
@@ -2504,25 +2666,26 @@ function Invoke-WinTriage {
             if (-not $evt) {
                 continue
             }
-            if ($evt.ProviderName -ne 'Application Error') {
-                continue
+            $hasProcessPattern = $false
+            if ($evt.ProviderName -eq 'Application Error' -and $evt.Id -eq 1000 -and -not [string]::IsNullOrWhiteSpace($evt.Message)) {
+                if ($evt.Message -match 'Nombre de aplicación con errores:|Faulting application name:') {
+                    $hasProcessPattern = $true
+                }
             }
-            if ([string]::IsNullOrWhiteSpace($evt.Message)) {
-                continue
-            }
-            if ($evt.Message -notmatch 'Nombre de aplicación con errores:') {
-                continue
-            }
-            if (-not [string]::IsNullOrWhiteSpace($evt.AffectedProcess)) {
-                continue
+            elseif ($evt.ProviderName -eq 'Windows Error Reporting' -and $evt.Id -eq 1001) {
+                if (($evt.WerEventName -eq 'APPCRASH') -or ($evt.Message -match 'Nombre de evento:\s*APPCRASH|Event Name:\s*APPCRASH')) {
+                    $hasProcessPattern = $true
+                }
             }
 
-            $eventProcessParsingWarningNeeded = $true
-            break
+            if ($hasProcessPattern -and [string]::IsNullOrWhiteSpace($evt.AffectedProcess)) {
+                $eventProcessParsingWarningNeeded = $true
+                break
+            }
         }
 
         if ($eventProcessParsingWarningNeeded) {
-            Add-WTExecutionWarning -Report $report -Scope 'EventProcessParsing' -Message 'Application Error event contains a faulting application name but process extraction failed.'
+            Add-WTExecutionWarning -Report $report -Scope 'EventProcessParsing' -Message 'Application crash event contains a process name pattern but process extraction failed.'
         }
 
         $report.Raw.Updates = [pscustomobject]@{
