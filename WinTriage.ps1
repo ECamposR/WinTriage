@@ -17,7 +17,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.4.3'
+$script:WTVersion = '0.5.0'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -642,6 +642,9 @@ function Test-WTRequiredFunctions {
         'Add-WTExecutionError'
         'Add-WTExecutionWarning'
         'ConvertTo-WTMarkdownCell'
+        'Get-WTDefenderInfo'
+        'ConvertTo-WTNormalizedDefenderInfo'
+        'Invoke-WTDefenderRules'
     )
 
     $missing = @()
@@ -680,6 +683,7 @@ function Write-WTConsoleSummary {
     $ramText = 'Unknown'
     $powerText = 'Fast Startup Unknown, recent shutdowns Unknown, unexpected Unknown'
     $updatesText = 'Unknown'
+    $securityText = 'Unknown'
     $eventsText = 'Unknown'
     $systemDriveLabel = 'C:'
     $powerBoot = $Report.Normalized.PowerBoot
@@ -738,6 +742,14 @@ function Write-WTConsoleSummary {
         $servicingIndicatorCount = @($updates.ServicingWerEvents).Count + @($updates.StoreWerEvents).Count + @($updates.EdgeUpdateWerEvents).Count
         $updatesText = '{0} WU errors, update reboot {1}, restart signals {2}, servicing indicators {3}' -f $updates.WindowsUpdateFailureCount, $updateRebootText, $restartSignalText, $servicingIndicatorCount
     }
+    if ($Report.Normalized.Defender) {
+        if ($Report.Normalized.Defender.DefenderStatusAvailable -eq $false -and $Report.Normalized.Defender.SecurityCenterAvailable -eq $false -and $Report.Normalized.Defender.FirewallStatusAvailable -eq $false) {
+            $securityText = 'Unknown'
+        }
+        else {
+            $securityText = 'AV {0}, Defender {1}, Firewall {2}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.Defender.AntivirusSummary -Fallback 'Unknown'), (ConvertTo-WTDisplayValue -Value $Report.Normalized.Defender.DefenderSummary -Fallback 'Unknown'), (ConvertTo-WTDisplayValue -Value $Report.Normalized.Defender.FirewallSummary -Fallback 'Unknown')
+        }
+    }
     if ($Report.Normalized.Events) {
         if (@($Report.Normalized.Events.LogsUnavailable).Count -ge 2 -and @($Report.Normalized.Events.AllEvents).Count -eq 0) {
             $eventsText = 'Unknown'
@@ -768,6 +780,7 @@ function Write-WTConsoleSummary {
         ('RAM: {0}' -f $ramText),
         ('Power: {0}' -f $powerText),
         ('Updates: {0}' -f $updatesText),
+        ('Security: {0}' -f $securityText),
         ('Events: {0}' -f $eventsText),
         ('Report directory: {0}' -f $Report.Metadata.ReportDirectory),
         ('JSON: {0}' -f $jsonPathText),
@@ -775,28 +788,22 @@ function Write-WTConsoleSummary {
         ('Output fallback used: {0}' -f $fallbackText),
         'Read-only diagnostic completed.'
     )
+    $summaryLines = @()
+    if ($lines.Count -gt 1) {
+        $summaryLines = @($lines[0..($lines.Count - 2)])
+    }
 
     if ($NoColor) {
-        foreach ($line in $lines) {
+        foreach ($line in $summaryLines) {
             Write-Host $line
         }
     }
     else {
-        Write-Host $lines[0] -ForegroundColor Cyan
-        Write-Host $lines[1] -ForegroundColor Gray
-        Write-Host $lines[2] -ForegroundColor White
-        Write-Host $lines[3] -ForegroundColor DarkGray
-        Write-Host $lines[4] -ForegroundColor Gray
-        Write-Host $lines[5] -ForegroundColor Gray
-        Write-Host $lines[6] -ForegroundColor Gray
-        Write-Host $lines[7] -ForegroundColor Gray
-        Write-Host $lines[8] -ForegroundColor Gray
-        Write-Host $lines[9] -ForegroundColor Gray
-        Write-Host $lines[10] -ForegroundColor Gray
-        Write-Host $lines[11] -ForegroundColor DarkGray
-        Write-Host $lines[12] -ForegroundColor Gray
-        Write-Host $lines[13] -ForegroundColor Gray
-        Write-Host $lines[14] -ForegroundColor DarkGray
+        $lineColors = @('Cyan','Gray','White','DarkGray','Gray','Gray','Gray','Gray','Gray','Gray','Gray','Gray','DarkGray','Gray','Gray','DarkGray')
+        for ($i = 0; $i -lt $summaryLines.Count; $i++) {
+            $color = if ($i -lt $lineColors.Count) { $lineColors[$i] } else { 'Gray' }
+            Write-Host $summaryLines[$i] -ForegroundColor $color
+        }
     }
 
     $errorRows = @($Report.Execution.Errors)
@@ -861,11 +868,11 @@ function Write-WTConsoleSummary {
     }
 
     if ($NoColor) {
-        Write-Host $lines[15]
+        Write-Host $lines[$lines.Count - 1]
         return
     }
 
-    Write-Host $lines[15] -ForegroundColor Green
+    Write-Host $lines[$lines.Count - 1] -ForegroundColor Green
 }
 
 function Export-WTJsonReport {
@@ -1064,6 +1071,79 @@ function Export-WTMarkdownReport {
     }
     else {
         [void]$sb.AppendLine('No Windows Update data available.')
+        [void]$sb.AppendLine('')
+    }
+    [void]$sb.AppendLine('## Security / Defender Overview')
+    [void]$sb.AppendLine('')
+    $defender = $Report.Normalized.Defender
+    if ($defender) {
+        [void]$sb.AppendLine(('* Defender cmdlet available: {0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderCmdletAvailable)))
+        [void]$sb.AppendLine(('* Defender running mode: {0}' -f (ConvertTo-WTMarkdownCell -Value $defender.DefenderRunningMode)))
+        [void]$sb.AppendLine(('* Defender antivirus enabled: {0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderAntivirusEnabled)))
+        [void]$sb.AppendLine(('* Defender realtime protection enabled: {0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderRealtimeProtectionEnabled)))
+        [void]$sb.AppendLine(('* Defender signatures outdated: {0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderSignaturesOutOfDate)))
+        [void]$sb.AppendLine(('* Defender AV signature last updated: {0}' -f (ConvertTo-WTMarkdownCell -Value $defender.DefenderAntivirusSignatureLastUpdated -Fallback 'Not available')))
+        [void]$sb.AppendLine(('* Defender tamper protected: {0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderTamperProtected)))
+        [void]$sb.AppendLine(('* Security Center available: {0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.SecurityCenterAvailable)))
+        [void]$sb.AppendLine(('* Third-party AV detected: {0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.ThirdPartyAntivirusDetected)))
+        [void]$sb.AppendLine(('* Sophos detected: {0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.SophosDetected)))
+        [void]$sb.AppendLine(('* Antivirus summary: {0}' -f (ConvertTo-WTMarkdownCell -Value $defender.AntivirusSummary)))
+        [void]$sb.AppendLine(('* Defender summary: {0}' -f (ConvertTo-WTMarkdownCell -Value $defender.DefenderSummary)))
+        [void]$sb.AppendLine(('* Firewall summary: {0}' -f (ConvertTo-WTMarkdownCell -Value $defender.FirewallSummary)))
+        [void]$sb.AppendLine(('* Security posture summary: {0}' -f (ConvertTo-WTMarkdownCell -Value $defender.SecurityPostureSummary)))
+        [void]$sb.AppendLine(('* Defender threat events: {0}' -f (Get-WTArrayCountSafe -Value $defender.DefenderThreatEvents)))
+        [void]$sb.AppendLine(('* Defender protection disabled events: {0}' -f (Get-WTArrayCountSafe -Value $defender.DefenderProtectionDisabledEvents)))
+        [void]$sb.AppendLine(('* Defender config change events: {0}' -f (Get-WTArrayCountSafe -Value $defender.DefenderConfigChangeEvents)))
+        [void]$sb.AppendLine(('* Defender error events: {0}' -f (Get-WTArrayCountSafe -Value $defender.DefenderErrorEvents)))
+        [void]$sb.AppendLine(('* Defender exclusion path count: {0}' -f (ConvertTo-WTDisplayValue -Value $defender.DefenderExclusionPathCount -Fallback 'Unknown')))
+        [void]$sb.AppendLine(('* Defender exclusion process count: {0}' -f (ConvertTo-WTDisplayValue -Value $defender.DefenderExclusionProcessCount -Fallback 'Unknown')))
+        [void]$sb.AppendLine(('* Defender exclusion extension count: {0}' -f (ConvertTo-WTDisplayValue -Value $defender.DefenderExclusionExtensionCount -Fallback 'Unknown')))
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Security Products')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| Name | Source | ProductState | Path |')
+        [void]$sb.AppendLine('| --- | --- | --- | --- |')
+        $securityProductRows = @($defender.SecurityProducts)
+        if ($securityProductRows.Count -eq 0) {
+            [void]$sb.AppendLine('| Unknown | Unknown | Unknown | Unknown |')
+        }
+        else {
+            foreach ($product in @($securityProductRows | Select-Object -First 10)) {
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value $product.Name), (ConvertTo-WTMarkdownCell -Value $product.Source), (ConvertTo-WTMarkdownCell -Value $product.ProductState), (ConvertTo-WTMarkdownCell -Value $product.Path)))
+            }
+        }
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Firewall Profiles')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| Profile | Enabled | DefaultInboundAction | DefaultOutboundAction |')
+        [void]$sb.AppendLine('| --- | --- | --- | --- |')
+        $firewallRows = @($defender.FirewallProfiles)
+        if ($firewallRows.Count -eq 0) {
+            [void]$sb.AppendLine('| Unknown | Unknown | Unknown | Unknown |')
+        }
+        else {
+            foreach ($profile in $firewallRows) {
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value $profile.Name), (ConvertTo-WTYesNoUnknown -Value $profile.Enabled), (ConvertTo-WTMarkdownCell -Value $profile.DefaultInboundAction), (ConvertTo-WTMarkdownCell -Value $profile.DefaultOutboundAction)))
+            }
+        }
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('### Recent Defender Events')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| TimeCreated | Id | Level | MessageShort |')
+        [void]$sb.AppendLine('| --- | ---: | --- | --- |')
+        $defenderRecentRows = @($defender.RecentDefenderEvents)
+        if ($defenderRecentRows.Count -eq 0) {
+            [void]$sb.AppendLine('No recent Defender events found or log unavailable.')
+        }
+        else {
+            foreach ($evt in $defenderRecentRows) {
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'), (ConvertTo-WTMarkdownCell -Value $evt.Id), (ConvertTo-WTMarkdownCell -Value $evt.LevelDisplayName), (ConvertTo-WTMarkdownCell -Value $evt.MessageShort)))
+            }
+        }
+        [void]$sb.AppendLine('')
+    }
+    else {
+        [void]$sb.AppendLine('No security/Defender data available.')
         [void]$sb.AppendLine('')
     }
     [void]$sb.AppendLine('## Disk Overview')
@@ -1849,6 +1929,803 @@ function Get-WTEventIndicatorCategory {
     }
 
     return $null
+}
+
+function Get-WTDefenderEventCollectionLimit {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string]$Mode = 'Standard'
+    )
+
+    switch ($Mode) {
+        'Quick' { return 100 }
+        'Full' { return 1000 }
+        default { return 300 }
+    }
+}
+
+function Get-WTSecurityCenterProductStateInfo {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$ProductState
+    )
+
+    if ($null -eq $ProductState -or $ProductState -eq '') {
+        return [pscustomobject]@{
+            ProductState = $null
+            StateText    = 'Unknown'
+            IsActive     = $null
+        }
+    }
+
+    try {
+        $state = [int64]$ProductState
+    }
+    catch {
+        return [pscustomobject]@{
+            ProductState = $ProductState
+            StateText    = 'Unknown'
+            IsActive     = $null
+        }
+    }
+
+    $stateText = 'Unknown'
+    $isActive = $null
+    switch ($state) {
+        262144 { $stateText = 'Off'; $isActive = $false }
+        266240 { $stateText = 'On'; $isActive = $true }
+        393216 { $stateText = 'Off'; $isActive = $false }
+        393472 { $stateText = 'Off'; $isActive = $false }
+        397312 { $stateText = 'On'; $isActive = $true }
+        397568 { $stateText = 'On'; $isActive = $true }
+        default {
+            if (($state -band 0x1000) -eq 0x1000) {
+                $stateText = 'On'
+                $isActive = $true
+            }
+            elseif (($state -band 0x40000) -eq 0x40000) {
+                $stateText = 'Off'
+                $isActive = $false
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        ProductState = ('0x{0:X}' -f $state)
+        StateText    = $stateText
+        IsActive     = $isActive
+    }
+}
+
+function Get-WTDefenderEventClassification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Event
+    )
+
+    $combinedText = @(
+        $Event.Message
+        $Event.MessageShort
+    ) -join "`n"
+
+    if ($Event.Id -in @(1116, 1117, 1118, 1119, 1121) -or $combinedText -match '(?i)\bthreat\b|\bmalware\b|\bsevere threat\b') {
+        return 'Threat'
+    }
+
+    if ($Event.Id -eq 5001 -or $combinedText -match '(?i)real-time protection disabled|protección en tiempo real deshabilitada') {
+        return 'ProtectionDisabled'
+    }
+
+    if ($Event.Id -in @(5007, 5013) -or $combinedText -match '(?i)configuration changed|configuración cambiad|tamper protection|protección contra alteraciones|policy') {
+        return 'ConfigChange'
+    }
+
+    if ($Event.Id -in @(1008, 1011) -or $Event.Level -eq 2 -or $combinedText -match '(?i)\berror\b|\bfailed\b|fall[oó]') {
+        return 'Error'
+    }
+
+    return 'Other'
+}
+
+function Get-WTDefenderInfo {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report,
+
+        [ValidateRange(1, 90)]
+        [int]$Days = 7,
+
+        [AllowNull()]
+        [string]$Mode = 'Standard'
+    )
+
+    $windowEnd = Get-Date
+    $windowStart = $windowEnd.AddDays(-1 * [math]::Abs($Days))
+    $eventLimit = Get-WTDefenderEventCollectionLimit -Mode $Mode
+    $logsUnavailable = @()
+
+    $defenderCmdletAvailable = [bool](Get-Command -Name Get-MpComputerStatus -ErrorAction SilentlyContinue)
+    $defenderPreferenceCmdletAvailable = [bool](Get-Command -Name Get-MpPreference -ErrorAction SilentlyContinue)
+
+    $defenderStatus = $null
+    if ($defenderCmdletAvailable) {
+        try {
+            $status = Get-MpComputerStatus -ErrorAction Stop
+            $defenderStatus = [pscustomobject]@{
+                AMServiceEnabled              = $status.AMServiceEnabled
+                AntispywareEnabled            = $status.AntispywareEnabled
+                AntivirusEnabled              = $status.AntivirusEnabled
+                BehaviorMonitorEnabled         = $status.BehaviorMonitorEnabled
+                IoavProtectionEnabled          = $status.IoavProtectionEnabled
+                NISEnabled                     = $status.NISEnabled
+                OnAccessProtectionEnabled      = $status.OnAccessProtectionEnabled
+                RealTimeProtectionEnabled      = $status.RealTimeProtectionEnabled
+                IsTamperProtected              = $status.IsTamperProtected
+                DefenderSignaturesOutOfDate    = $status.DefenderSignaturesOutOfDate
+                AntivirusSignatureLastUpdated  = ConvertTo-WTDateTimeString -Value $status.AntivirusSignatureLastUpdated
+                AntispywareSignatureLastUpdated = ConvertTo-WTDateTimeString -Value $status.AntispywareSignatureLastUpdated
+                NISSignatureLastUpdated        = ConvertTo-WTDateTimeString -Value $status.NISSignatureLastUpdated
+                FullScanAge                    = $status.FullScanAge
+                QuickScanAge                   = $status.QuickScanAge
+                FullScanEndTime                = ConvertTo-WTDateTimeString -Value $status.FullScanEndTime
+                QuickScanEndTime               = ConvertTo-WTDateTimeString -Value $status.QuickScanEndTime
+                RealTimeScanDirection          = $status.RealTimeScanDirection
+                AMRunningMode                  = $status.AMRunningMode
+                ComputerState                  = $status.ComputerState
+            }
+        }
+        catch {
+            [void](Add-WTExecutionWarning -Report $Report -Scope 'Defender' -Message ('Get-MpComputerStatus failed: {0}' -f $_.Exception.Message))
+            $defenderStatus = $null
+        }
+    }
+
+    $defenderPreference = $null
+    if ($defenderPreferenceCmdletAvailable) {
+        try {
+            $pref = Get-MpPreference -ErrorAction Stop
+            $exclusionPath = @($pref.ExclusionPath)
+            $exclusionProcess = @($pref.ExclusionProcess)
+            $exclusionExtension = @($pref.ExclusionExtension)
+            $exclusionIpAddress = @($pref.ExclusionIpAddress)
+            $defenderPreference = [pscustomobject]@{
+                DisableRealtimeMonitoring = $pref.DisableRealtimeMonitoring
+                DisableBehaviorMonitoring  = $pref.DisableBehaviorMonitoring
+                DisableIOAVProtection      = $pref.DisableIOAVProtection
+                DisableScriptScanning      = $pref.DisableScriptScanning
+                MAPSReporting              = $pref.MAPSReporting
+                SubmitSamplesConsent       = $pref.SubmitSamplesConsent
+                ExclusionPathCount         = $exclusionPath.Count
+                ExclusionProcessCount      = $exclusionProcess.Count
+                ExclusionExtensionCount    = $exclusionExtension.Count
+                ExclusionIpAddressCount    = $exclusionIpAddress.Count
+                ExclusionPathSample        = @($exclusionPath | Select-Object -First 5)
+                ExclusionProcessSample     = @($exclusionProcess | Select-Object -First 5)
+                ExclusionExtensionSample   = @($exclusionExtension | Select-Object -First 5)
+            }
+        }
+        catch {
+            [void](Add-WTExecutionWarning -Report $Report -Scope 'Defender' -Message ('Get-MpPreference failed: {0}' -f $_.Exception.Message))
+            $defenderPreference = $null
+        }
+    }
+
+    $securityCenterAvailable = $false
+    $securityCenterProducts = @()
+    try {
+        $securityCenterProducts = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop)
+        $securityCenterAvailable = $true
+    }
+    catch {
+        $securityCenterAvailable = $false
+        $securityCenterProducts = @()
+    }
+
+    $securityProducts = @()
+    foreach ($product in $securityCenterProducts) {
+        if (-not $product) {
+            continue
+        }
+        $stateInfo = Get-WTSecurityCenterProductStateInfo -ProductState $product.productState
+        $displayName = ConvertTo-WTDisplayValue -Value $product.displayName -Fallback 'Unknown'
+        $isMicrosoft = $displayName -match '(?i)Microsoft Defender|Windows Defender'
+        $securityProducts += [pscustomobject]@{
+            Name                 = $displayName
+            Source               = 'SecurityCenter2'
+            ProductState         = $stateInfo.ProductState
+            StateText            = $stateInfo.StateText
+            IsActive             = $stateInfo.IsActive
+            IsMicrosoft          = $isMicrosoft
+            InstanceGuid         = ConvertTo-WTDisplayValue -Value $product.instanceGuid -Fallback 'Unknown'
+            Path                 = ConvertTo-WTDisplayValue -Value $product.pathToSignedProductExe -Fallback 'Unknown'
+            ReportingPath        = ConvertTo-WTDisplayValue -Value $product.pathToSignedReportingExe -Fallback 'Unknown'
+            Timestamp            = ConvertTo-WTDisplayValue -Value $product.timestamp -Fallback 'Unknown'
+        }
+    }
+
+    if ($defenderStatus) {
+        $defenderProductState = 'Unknown'
+        $defenderActive = $null
+        if ($defenderStatus.AntivirusEnabled -eq $true -or $defenderStatus.RealTimeProtectionEnabled -eq $true -or $defenderStatus.OnAccessProtectionEnabled -eq $true) {
+            $defenderActive = $true
+            $defenderProductState = 'Enabled'
+        }
+        elseif ($defenderStatus.AntivirusEnabled -eq $false -and $defenderStatus.RealTimeProtectionEnabled -eq $false -and $defenderStatus.OnAccessProtectionEnabled -eq $false) {
+            $defenderActive = $false
+            $defenderProductState = 'Disabled'
+        }
+
+        $securityProducts += [pscustomobject]@{
+            Name                 = 'Microsoft Defender'
+            Source               = 'Get-MpComputerStatus'
+            ProductState         = $defenderProductState
+            StateText            = (ConvertTo-WTEnabledDisabledUnknown -Value $defenderActive)
+            IsActive             = $defenderActive
+            IsMicrosoft          = $true
+            InstanceGuid         = 'Defender'
+            Path                 = $null
+            ReportingPath        = $null
+            Timestamp            = $defenderStatus.AntivirusSignatureLastUpdated
+        }
+    }
+
+    $securityProducts = @($securityProducts)
+    $activeAntivirusProducts = @($securityProducts | Where-Object { $_.IsActive -eq $true })
+    $thirdPartyAntivirusDetected = $false
+    $sophosDetected = $false
+    foreach ($product in $securityCenterProducts) {
+        if (-not $product) {
+            continue
+        }
+        $displayName = ConvertTo-WTDisplayValue -Value $product.displayName -Fallback 'Unknown'
+        if ($displayName -and $displayName -notmatch '(?i)Microsoft Defender|Windows Defender') {
+            $thirdPartyAntivirusDetected = $true
+        }
+        if ($displayName -match '(?i)Sophos|Intercept X') {
+            $sophosDetected = $true
+            $thirdPartyAntivirusDetected = $true
+        }
+    }
+
+    $firewallProfiles = @()
+    $firewallStatusAvailable = $false
+    try {
+        if (Get-Command -Name Get-NetFirewallProfile -ErrorAction SilentlyContinue) {
+            $firewallStatusAvailable = $true
+            $profiles = @(Get-NetFirewallProfile -ErrorAction Stop)
+            foreach ($profile in $profiles) {
+                $firewallProfiles += [pscustomobject]@{
+                    Name                  = ConvertTo-WTDisplayValue -Value $profile.Name -Fallback 'Unknown'
+                    Enabled               = $profile.Enabled
+                    DefaultInboundAction  = ConvertTo-WTDisplayValue -Value $profile.DefaultInboundAction -Fallback 'Unknown'
+                    DefaultOutboundAction = ConvertTo-WTDisplayValue -Value $profile.DefaultOutboundAction -Fallback 'Unknown'
+                    NotifyOnListen        = $profile.NotifyOnListen
+                    LogFileName           = ConvertTo-WTDisplayValue -Value $profile.LogFileName -Fallback 'Unknown'
+                    LogAllowed            = $profile.LogAllowed
+                    LogBlocked            = $profile.LogBlocked
+                }
+            }
+        }
+    }
+    catch {
+        $firewallStatusAvailable = $false
+        $firewallProfiles = @()
+    }
+
+    $securityServices = @()
+    foreach ($serviceName in @('WinDefend', 'SecurityHealthService', 'wscsvc', 'mpssvc', 'Sense')) {
+        $securityServices += Get-WTServiceSnapshot -Name $serviceName
+    }
+
+    $defenderLogName = 'Microsoft-Windows-Windows Defender/Operational'
+    $defenderIds = @(1000, 1001, 1006, 1007, 1008, 1011, 1116, 1117, 1118, 1119, 1121, 5001, 5007, 5013)
+    $defenderRawEvents = @()
+    $defenderQueryFailures = 0
+    foreach ($query in @(
+        @{
+            LogName   = $defenderLogName
+            StartTime = $windowStart
+            Id        = $defenderIds
+        },
+        @{
+            LogName   = $defenderLogName
+            StartTime = $windowStart
+            Level     = 2
+        },
+        @{
+            LogName   = $defenderLogName
+            StartTime = $windowStart
+            Level     = 3
+        }
+    )) {
+        try {
+            $defenderRawEvents += @(Get-WinEvent -FilterHashtable $query -MaxEvents ($eventLimit + 1) -ErrorAction Stop)
+        }
+        catch {
+            $reason = $_.Exception.Message
+            if ($reason -match '(?i)(no matching events|no se encontraron eventos|no events were found|no events match|no hay eventos)') {
+                continue
+            }
+            $defenderQueryFailures++
+        }
+    }
+
+    if ($defenderRawEvents.Count -eq 0 -and $defenderQueryFailures -gt 0) {
+        $logsUnavailable += [pscustomobject]@{
+            LogName = $defenderLogName
+            Reason  = 'Unable to read Defender operational events.'
+        }
+    }
+
+    $defenderEvents = @()
+    $defenderSeenKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($event in @($defenderRawEvents | Sort-Object -Property TimeCreated -Descending)) {
+        $record = ConvertTo-WTEventRecord -EventRecord $event
+        $key = Get-WTEventKey -Event $record
+        if ($key -and $defenderSeenKeys.Add($key)) {
+            $defenderEvents += $record
+        }
+        if ($defenderEvents.Count -ge $eventLimit) {
+            break
+        }
+    }
+    if ($defenderEvents.Count -ge $eventLimit) {
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Defender' -Message ('Event collection limit reached for {0}. Results may be incomplete.' -f $defenderLogName))
+    }
+
+    return [pscustomobject]@{
+        WindowStart            = $windowStart
+        WindowEnd              = $windowEnd
+        Days                   = $Days
+        Mode                   = $Mode
+        DefenderCmdletAvailable = $defenderCmdletAvailable
+        DefenderStatusAvailable = [bool]$defenderStatus
+        DefenderStatus         = $defenderStatus
+        DefenderPreferenceAvailable = [bool]$defenderPreference
+        DefenderPreference     = $defenderPreference
+        SecurityCenterAvailable = $securityCenterAvailable
+        SecurityProducts       = @($securityProducts)
+        FirewallStatusAvailable = $firewallStatusAvailable
+        FirewallProfiles       = @($firewallProfiles)
+        SecurityServices       = @($securityServices)
+        DefenderEvents         = @($defenderEvents)
+        SecurityEvents         = @($defenderEvents)
+        LogsUnavailable        = @($logsUnavailable)
+    }
+}
+
+function ConvertTo-WTNormalizedDefenderInfo {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$DefenderInfo
+    )
+
+    if (-not $DefenderInfo) {
+        return [pscustomobject]@{
+            DefenderCmdletAvailable      = $false
+            DefenderStatusAvailable      = $false
+            DefenderRunningMode          = 'Unknown'
+            DefenderAntivirusEnabled     = $null
+            DefenderRealtimeProtectionEnabled = $null
+            DefenderBehaviorMonitorEnabled = $null
+            DefenderIoavProtectionEnabled = $null
+            DefenderSignaturesOutOfDate   = $null
+            DefenderAntivirusSignatureLastUpdated = $null
+            DefenderAntispywareSignatureLastUpdated = $null
+            DefenderNisSignatureLastUpdated = $null
+            DefenderTamperProtected       = $null
+            DefenderPreferenceAvailable   = $false
+            DefenderExclusionPathCount    = $null
+            DefenderExclusionProcessCount = $null
+            DefenderExclusionExtensionCount = $null
+            SecurityCenterAvailable       = $false
+            SecurityProducts              = @()
+            AntivirusProducts             = @()
+            ActiveAntivirusProducts       = @()
+            ThirdPartyAntivirusDetected   = $false
+            SophosDetected                = $false
+            FirewallProfiles              = @()
+            FirewallStatusAvailable       = $false
+            FirewallAllProfilesEnabled    = $null
+            FirewallAnyProfileDisabled    = $null
+            SecurityServices              = @()
+            DefenderEvents                = @()
+            SecurityEvents                = @()
+            RecentDefenderEvents          = @()
+            DefenderThreatEvents          = @()
+            DefenderProtectionDisabledEvents = @()
+            DefenderConfigChangeEvents    = @()
+            DefenderErrorEvents           = @()
+            SecurityPostureSummary        = 'Security posture partial: Defender status unavailable'
+            DefenderSummary               = 'Microsoft Defender status unavailable'
+            AntivirusSummary              = 'Security Center unavailable'
+            FirewallSummary               = 'Firewall status unavailable'
+            LogsUnavailable               = @()
+        }
+    }
+
+    $defenderStatus = $DefenderInfo.DefenderStatus
+    $defenderPreference = $DefenderInfo.DefenderPreference
+    $securityCenterProducts = @($DefenderInfo.SecurityProducts)
+    $securityProducts = @()
+    foreach ($product in $securityCenterProducts) {
+        if ($product) {
+            $securityProducts += $product
+        }
+    }
+
+    $defenderProduct = $null
+    if ($DefenderInfo.DefenderStatusAvailable -eq $true -and $defenderStatus) {
+        $defenderEnabled = $null
+        if ($defenderStatus.AntivirusEnabled -eq $true -or $defenderStatus.RealTimeProtectionEnabled -eq $true -or $defenderStatus.OnAccessProtectionEnabled -eq $true) {
+            $defenderEnabled = $true
+        }
+        elseif ($defenderStatus.AntivirusEnabled -eq $false -and $defenderStatus.RealTimeProtectionEnabled -eq $false -and $defenderStatus.OnAccessProtectionEnabled -eq $false) {
+            $defenderEnabled = $false
+        }
+
+        $defenderProduct = [pscustomobject]@{
+            Name       = 'Microsoft Defender'
+            Source     = 'Get-MpComputerStatus'
+            ProductState = if ($defenderEnabled -eq $true) { 'Enabled' } elseif ($defenderEnabled -eq $false) { 'Disabled' } else { 'Unknown' }
+            StateText  = if ($defenderEnabled -eq $true) { 'On' } elseif ($defenderEnabled -eq $false) { 'Off' } else { 'Unknown' }
+            IsActive   = $defenderEnabled
+            IsMicrosoft = $true
+            InstanceGuid = 'Defender'
+            Path       = $null
+            ReportingPath = $null
+            Timestamp  = $defenderStatus.AntivirusSignatureLastUpdated
+        }
+        if (-not ($securityProducts | Where-Object { $_.Name -match '(?i)Microsoft Defender|Windows Defender' })) {
+            $securityProducts += $defenderProduct
+        }
+    }
+
+    $antivirusProducts = @($securityProducts)
+    $activeAntivirusProducts = @($securityProducts | Where-Object { $_.IsActive -eq $true })
+
+    $thirdPartyAntivirusDetected = $false
+    $sophosDetected = $false
+    foreach ($product in @($DefenderInfo.SecurityProducts)) {
+        if (-not $product) {
+            continue
+        }
+        $name = ConvertTo-WTDisplayValue -Value $product.Name -Fallback 'Unknown'
+        if ($name -and $name -notmatch '(?i)Microsoft Defender|Windows Defender') {
+            $thirdPartyAntivirusDetected = $true
+        }
+        if ($name -match '(?i)Sophos|Intercept X') {
+            $sophosDetected = $true
+            $thirdPartyAntivirusDetected = $true
+        }
+    }
+
+    $firewallProfiles = @()
+    foreach ($profile in @($DefenderInfo.FirewallProfiles)) {
+        if ($profile) {
+            $firewallProfiles += $profile
+        }
+    }
+    $firewallAllEnabled = $null
+    $firewallAnyDisabled = $null
+    if ($DefenderInfo.FirewallStatusAvailable -eq $true -and $firewallProfiles.Count -gt 0) {
+        $firewallAllEnabled = -not ($firewallProfiles | Where-Object { $_.Enabled -eq $false } | Measure-Object).Count
+        $firewallAnyDisabled = [bool]($firewallProfiles | Where-Object { $_.Enabled -eq $false } | Measure-Object).Count
+    }
+
+    $defenderEvents = @($DefenderInfo.DefenderEvents | Where-Object { $_ })
+    $defenderThreatEvents = @()
+    $defenderProtectionDisabledEvents = @()
+    $defenderConfigChangeEvents = @()
+    $defenderErrorEvents = @()
+    foreach ($evt in $defenderEvents) {
+        $classification = Get-WTDefenderEventClassification -Event $evt
+        switch ($classification) {
+            'Threat' { $defenderThreatEvents += $evt }
+            'ProtectionDisabled' { $defenderProtectionDisabledEvents += $evt }
+            'ConfigChange' { $defenderConfigChangeEvents += $evt }
+            'Error' { $defenderErrorEvents += $evt }
+        }
+    }
+
+    $recentDefenderEvents = @(
+        $defenderEvents |
+            Sort-Object -Property @{
+                Expression = {
+                    switch (Get-WTDefenderEventClassification -Event $_) {
+                        'Threat' { 0 }
+                        'ProtectionDisabled' { 1 }
+                        'Error' { 2 }
+                        'ConfigChange' { 3 }
+                        default { 4 }
+                    }
+                }
+            }, @{ Expression = { $_.TimeCreated }; Descending = $true } |
+            Select-Object -First 10
+    )
+
+    $defenderCmdletAvailable = [bool]$DefenderInfo.DefenderCmdletAvailable
+    $defenderStatusAvailable = [bool]$DefenderInfo.DefenderStatusAvailable
+    $defenderPreferenceAvailable = [bool]$DefenderInfo.DefenderPreferenceAvailable
+    $defenderRunningMode = 'Unknown'
+    if ($defenderStatusAvailable -and $defenderStatus) {
+        if ($defenderStatus.AMRunningMode) {
+            $defenderRunningMode = ConvertTo-WTDisplayValue -Value $defenderStatus.AMRunningMode -Fallback 'Unknown'
+        }
+        elseif ($defenderStatus.ComputerState -ne $null) {
+            $defenderRunningMode = 'State {0}' -f $defenderStatus.ComputerState
+        }
+    }
+
+    $defenderAntivirusEnabled = $null
+    $defenderRealtimeProtectionEnabled = $null
+    $defenderBehaviorMonitorEnabled = $null
+    $defenderIoavProtectionEnabled = $null
+    $defenderSignaturesOutOfDate = $null
+    $defenderAntivirusSignatureLastUpdated = $null
+    $defenderAntispywareSignatureLastUpdated = $null
+    $defenderNisSignatureLastUpdated = $null
+    $defenderTamperProtected = $null
+    if ($defenderStatusAvailable -and $defenderStatus) {
+        $defenderAntivirusEnabled = $defenderStatus.AntivirusEnabled
+        $defenderRealtimeProtectionEnabled = $defenderStatus.RealTimeProtectionEnabled
+        $defenderBehaviorMonitorEnabled = $defenderStatus.BehaviorMonitorEnabled
+        $defenderIoavProtectionEnabled = $defenderStatus.IoavProtectionEnabled
+        $defenderSignaturesOutOfDate = $defenderStatus.DefenderSignaturesOutOfDate
+        $defenderAntivirusSignatureLastUpdated = $defenderStatus.AntivirusSignatureLastUpdated
+        $defenderAntispywareSignatureLastUpdated = $defenderStatus.AntispywareSignatureLastUpdated
+        $defenderNisSignatureLastUpdated = $defenderStatus.NISSignatureLastUpdated
+        $defenderTamperProtected = $defenderStatus.IsTamperProtected
+    }
+
+    if ($defenderSignaturesOutOfDate -eq $null -and $defenderAntivirusSignatureLastUpdated -and $defenderAntivirusSignatureLastUpdated -ne 'Unknown') {
+        try {
+            $updated = [datetime]$defenderAntivirusSignatureLastUpdated
+            $defenderSignaturesOutOfDate = ((Get-Date) - $updated).TotalDays -gt 7
+        }
+        catch {
+        }
+    }
+
+    if ($defenderPreferenceAvailable -and $defenderPreference) {
+        $defenderExclusionPathCount = $defenderPreference.ExclusionPathCount
+        $defenderExclusionProcessCount = $defenderPreference.ExclusionProcessCount
+        $defenderExclusionExtensionCount = $defenderPreference.ExclusionExtensionCount
+    }
+    else {
+        $defenderExclusionPathCount = $null
+        $defenderExclusionProcessCount = $null
+        $defenderExclusionExtensionCount = $null
+    }
+
+    $defenderActive = $false
+    if ($defenderAntivirusEnabled -eq $true -or $defenderRealtimeProtectionEnabled -eq $true -or $defenderBehaviorMonitorEnabled -eq $true -or $defenderIoavProtectionEnabled -eq $true) {
+        $defenderActive = $true
+    }
+
+    $defenderSummary = 'Microsoft Defender status unavailable'
+    if ($defenderActive -eq $true) {
+        $defenderSummary = 'Microsoft Defender active'
+    }
+    elseif ($thirdPartyAntivirusDetected -eq $true -and ($defenderAntivirusEnabled -eq $false -or $defenderRealtimeProtectionEnabled -eq $false)) {
+        $defenderSummary = 'Microsoft Defender passive or disabled, third-party antivirus detected'
+    }
+    elseif ($defenderStatusAvailable -eq $true -and $defenderActive -eq $false -and $thirdPartyAntivirusDetected -eq $false) {
+        $defenderSummary = 'Microsoft Defender disabled and no third-party antivirus detected'
+    }
+    elseif (-not $defenderStatusAvailable -and -not $thirdPartyAntivirusDetected) {
+        $defenderSummary = 'Microsoft Defender status unavailable'
+    }
+    elseif ($thirdPartyAntivirusDetected -eq $true) {
+        $defenderSummary = 'Microsoft Defender passive or disabled, third-party antivirus detected'
+    }
+
+    $antivirusSummary = 'No antivirus product detected'
+    if ($sophosDetected) {
+        $antivirusSummary = 'Sophos detected'
+    }
+    elseif ($thirdPartyAntivirusDetected) {
+        $antivirusSummary = 'Third-party antivirus detected'
+    }
+    elseif ($defenderActive -eq $true) {
+        $antivirusSummary = 'Microsoft Defender active'
+    }
+    elseif (-not $defenderStatusAvailable -and -not $DefenderInfo.SecurityCenterAvailable) {
+        $antivirusSummary = 'Security Center unavailable'
+    }
+
+    $firewallSummary = 'Firewall status unavailable'
+    if ($DefenderInfo.FirewallStatusAvailable -eq $true -and $firewallProfiles.Count -gt 0) {
+        if ($firewallAnyDisabled -eq $true) {
+            $firewallSummary = 'One or more firewall profiles disabled'
+        }
+        else {
+            $firewallSummary = 'All firewall profiles enabled'
+        }
+    }
+
+    $securityPostureSummary = 'Security posture partial: Defender status unavailable'
+    if ($sophosDetected -or $thirdPartyAntivirusDetected) {
+        $securityPostureSummary = 'Security posture appears protected by third-party antivirus'
+    }
+    elseif ($defenderActive -eq $true -and $firewallAnyDisabled -ne $true) {
+        $securityPostureSummary = 'Security posture appears protected by Microsoft Defender'
+    }
+    elseif ($defenderActive -eq $true -and $firewallAnyDisabled -eq $true) {
+        $securityPostureSummary = 'Security posture warning: firewall profile disabled'
+    }
+    elseif ($defenderActive -eq $false -and -not $thirdPartyAntivirusDetected -and ($defenderStatusAvailable -eq $true -or $DefenderInfo.SecurityCenterAvailable -eq $true)) {
+        $securityPostureSummary = 'Security posture warning: no active antivirus detected'
+    }
+    elseif (-not $defenderStatusAvailable -and -not $DefenderInfo.SecurityCenterAvailable) {
+        $securityPostureSummary = 'Security posture partial: Defender status unavailable'
+    }
+
+    return [pscustomobject]@{
+        DefenderCmdletAvailable        = $defenderCmdletAvailable
+        DefenderStatusAvailable        = $defenderStatusAvailable
+        DefenderRunningMode            = $defenderRunningMode
+        DefenderAntivirusEnabled       = $defenderAntivirusEnabled
+        DefenderRealtimeProtectionEnabled = $defenderRealtimeProtectionEnabled
+        DefenderBehaviorMonitorEnabled = $defenderBehaviorMonitorEnabled
+        DefenderIoavProtectionEnabled  = $defenderIoavProtectionEnabled
+        DefenderSignaturesOutOfDate     = $defenderSignaturesOutOfDate
+        DefenderAntivirusSignatureLastUpdated = $defenderAntivirusSignatureLastUpdated
+        DefenderAntispywareSignatureLastUpdated = $defenderAntispywareSignatureLastUpdated
+        DefenderNisSignatureLastUpdated = $defenderNisSignatureLastUpdated
+        DefenderTamperProtected         = $defenderTamperProtected
+        DefenderPreferenceAvailable     = $defenderPreferenceAvailable
+        DefenderExclusionPathCount      = $defenderExclusionPathCount
+        DefenderExclusionProcessCount   = $defenderExclusionProcessCount
+        DefenderExclusionExtensionCount = $defenderExclusionExtensionCount
+        SecurityCenterAvailable         = [bool]$DefenderInfo.SecurityCenterAvailable
+        SecurityProducts                = @($securityProducts)
+        AntivirusProducts               = @($antivirusProducts)
+        ActiveAntivirusProducts         = @($activeAntivirusProducts)
+        ThirdPartyAntivirusDetected     = $thirdPartyAntivirusDetected
+        SophosDetected                  = $sophosDetected
+        FirewallProfiles                = @($firewallProfiles)
+        FirewallStatusAvailable         = [bool]$DefenderInfo.FirewallStatusAvailable
+        FirewallAllProfilesEnabled      = $firewallAllEnabled
+        FirewallAnyProfileDisabled      = $firewallAnyDisabled
+        SecurityServices                = @($DefenderInfo.SecurityServices)
+        DefenderEvents                  = @($defenderEvents)
+        SecurityEvents                  = @($defenderEvents)
+        RecentDefenderEvents            = @($recentDefenderEvents)
+        DefenderThreatEvents            = @($defenderThreatEvents)
+        DefenderProtectionDisabledEvents = @($defenderProtectionDisabledEvents)
+        DefenderConfigChangeEvents      = @($defenderConfigChangeEvents)
+        DefenderErrorEvents             = @($defenderErrorEvents)
+        SecurityPostureSummary          = $securityPostureSummary
+        DefenderSummary                 = $defenderSummary
+        AntivirusSummary                = $antivirusSummary
+        FirewallSummary                 = $firewallSummary
+        LogsUnavailable                 = @($DefenderInfo.LogsUnavailable)
+    }
+}
+
+function Invoke-WTDefenderRules {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report
+    )
+
+    $defender = $Report.Normalized.Defender
+    if (-not $defender) {
+        return
+    }
+
+    $thirdPartyDetected = $defender.ThirdPartyAntivirusDetected -eq $true
+    $sophosDetected = $defender.SophosDetected -eq $true
+    $defenderActive = (
+        $defender.DefenderAntivirusEnabled -eq $true -or
+        $defender.DefenderRealtimeProtectionEnabled -eq $true -or
+        $defender.DefenderBehaviorMonitorEnabled -eq $true -or
+        $defender.DefenderIoavProtectionEnabled -eq $true
+    )
+
+    if ($sophosDetected) {
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-SOPHOS-DETECTED' -Category 'Security' -Severity 'Info' -Title 'Sophos antivirus detected' -Description 'A Sophos antivirus/security product appears to be registered on the system.' -Evidence @(
+            ('Products={0}' -f ((@($defender.SecurityProducts | Where-Object { $_.Name -match '(?i)Sophos|Intercept X' } | Select-Object -ExpandProperty Name) | Select-Object -Unique) -join ', ')),
+            ('DefenderRunningMode={0}' -f (ConvertTo-WTDisplayValue -Value $defender.DefenderRunningMode -Fallback 'Unknown')),
+            ('SecurityCenterAvailable={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.SecurityCenterAvailable))
+        ) -Recommendation 'Interpret Microsoft Defender status in context. Defender may be passive or disabled when a third-party AV is active.' -Source 'Invoke-WTDefenderRules' -Status 'Info')
+    }
+    elseif ($thirdPartyDetected) {
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-THIRDPARTY-AV-DETECTED' -Category 'Security' -Severity 'Info' -Title 'Third-party antivirus detected' -Description 'A third-party antivirus/security product appears to be registered on the system.' -Evidence @(
+            ('Products={0}' -f ((@($defender.SecurityProducts | Where-Object { $_.Name -notmatch '(?i)Microsoft Defender|Windows Defender' } | Select-Object -ExpandProperty Name) | Select-Object -Unique) -join ', ')),
+            ('DefenderRunningMode={0}' -f (ConvertTo-WTDisplayValue -Value $defender.DefenderRunningMode -Fallback 'Unknown')),
+            ('SecurityCenterAvailable={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.SecurityCenterAvailable))
+        ) -Recommendation 'Interpret Microsoft Defender status in context. Defender may be passive or disabled when a third-party AV is active.' -Source 'Invoke-WTDefenderRules' -Status 'Info')
+    }
+
+    if (-not $defenderActive -and -not $thirdPartyDetected) {
+        if ($defender.DefenderStatusAvailable -eq $true -or $defender.SecurityCenterAvailable -eq $true) {
+            [void](Add-WTFinding -Report $Report -Id 'WT-SEC-NO-AV-DETECTED' -Category 'Security' -Severity 'High' -Title 'No active antivirus product detected' -Description 'WinTriage could not identify Microsoft Defender active protection or a third-party antivirus product.' -Evidence @(
+                ('DefenderAntivirusEnabled={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderAntivirusEnabled)),
+                ('DefenderRealtimeProtectionEnabled={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderRealtimeProtectionEnabled)),
+                ('SecurityProducts={0}' -f (Get-WTArrayCountSafe -Value $defender.SecurityProducts)),
+                ('SecurityCenterAvailable={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.SecurityCenterAvailable))
+            ) -Recommendation 'Verify endpoint protection status manually or from your EDR/security console.' -Source 'Invoke-WTDefenderRules' -Status 'Warning')
+        }
+        else {
+            [void](Add-WTFinding -Report $Report -Id 'WT-SEC-STATUS-UNAVAILABLE' -Category 'Security' -Severity 'Low' -Title 'Security protection status unavailable' -Description 'WinTriage could not determine endpoint protection status from Defender or Security Center.' -Evidence @(
+                ('DefenderStatusAvailable={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderStatusAvailable)),
+                ('SecurityCenterAvailable={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.SecurityCenterAvailable))
+            ) -Recommendation 'Verify security status manually or from endpoint management/security console.' -Source 'Invoke-WTDefenderRules' -Status 'Warning')
+        }
+    }
+
+    if ($defender.DefenderStatusAvailable -eq $true -and $defender.DefenderRealtimeProtectionEnabled -eq $false -and -not $thirdPartyDetected) {
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-DEFENDER-RTP-DISABLED' -Category 'Security' -Severity 'High' -Title 'Defender real-time protection disabled' -Description 'Microsoft Defender real-time protection appears disabled and no third-party antivirus was detected.' -Evidence @(
+            ('DefenderRealtimeProtectionEnabled={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderRealtimeProtectionEnabled)),
+            ('DefenderAntivirusEnabled={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.DefenderAntivirusEnabled)),
+            ('ThirdPartyAntivirusDetected={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.ThirdPartyAntivirusDetected))
+        ) -Recommendation 'Verify security policy, endpoint protection and tamper protection status.' -Source 'Invoke-WTDefenderRules' -Status 'Warning')
+    }
+
+    if ($defender.DefenderStatusAvailable -eq $true -and $thirdPartyDetected -eq $true -and $defenderActive -ne $true) {
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-DEFENDER-PASSIVE-THIRDPARTY' -Category 'Security' -Severity 'Info' -Title 'Defender passive or disabled with third-party antivirus detected' -Description 'Microsoft Defender may be passive or disabled because another antivirus product is registered.' -Evidence @(
+            ('DefenderRunningMode={0}' -f (ConvertTo-WTDisplayValue -Value $defender.DefenderRunningMode -Fallback 'Unknown')),
+            ('ThirdPartyAntivirusDetected={0}' -f (ConvertTo-WTYesNoUnknown -Value $defender.ThirdPartyAntivirusDetected)),
+            ('Products={0}' -f (Get-WTArrayCountSafe -Value $defender.SecurityProducts))
+        ) -Recommendation 'Validate protection state from the third-party security console.' -Source 'Invoke-WTDefenderRules' -Status 'Info')
+    }
+
+    if ($defender.DefenderStatusAvailable -eq $true -and $defender.DefenderSignaturesOutOfDate -eq $true -and $defenderActive -eq $true) {
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-DEFENDER-SIGNATURES-OUTDATED' -Category 'Security' -Severity 'Medium' -Title 'Defender signatures appear outdated' -Description 'Microsoft Defender signatures appear outdated while Defender is active.' -Evidence @(
+            ('DefenderSignaturesOutOfDate=True'),
+            ('DefenderAntivirusSignatureLastUpdated={0}' -f (ConvertTo-WTDisplayValue -Value $defender.DefenderAntivirusSignatureLastUpdated -Fallback 'Unknown'))
+        ) -Recommendation 'Review update connectivity and Defender signature health.' -Source 'Invoke-WTDefenderRules' -Status 'Warning')
+    }
+
+    if ((@($defender.DefenderThreatEvents).Count) -ge 1) {
+        $threatLatest = @($defender.DefenderThreatEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        $threatIds = @($defender.DefenderThreatEvents | Group-Object -Property Id | Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, @{ Expression = { $_.Name }; Ascending = $true } | Select-Object -First 5 | ForEach-Object { '{0}({1})' -f $_.Name, $_.Count })
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-DEFENDER-THREATS' -Category 'Security' -Severity 'High' -Title 'Microsoft Defender threat events detected' -Description 'Microsoft Defender logged one or more threat-related events.' -Evidence @(
+            ('Count={0}' -f @($defender.DefenderThreatEvents).Count),
+            ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $threatLatest[0].TimeCreated)),
+            ('Ids={0}' -f ($threatIds -join ', ')),
+            ('MessageShort={0}' -f $threatLatest[0].MessageShort)
+        ) -Recommendation 'Review Defender event details and central security console. Confirm remediation result.' -Source 'Invoke-WTDefenderRules' -Status 'Warning')
+    }
+
+    if ((@($defender.DefenderProtectionDisabledEvents).Count) -ge 1) {
+        $disabledLatest = @($defender.DefenderProtectionDisabledEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-DEFENDER-PROTECTION-DISABLED-EVENTS' -Category 'Security' -Severity 'Medium' -Title 'Defender protection disabled events detected' -Description 'Microsoft Defender logged one or more protection disabled events.' -Evidence @(
+            ('Count={0}' -f @($defender.DefenderProtectionDisabledEvents).Count),
+            ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $disabledLatest[0].TimeCreated)),
+            ('MessageShort={0}' -f $disabledLatest[0].MessageShort)
+        ) -Recommendation 'Review whether this was expected by policy or a third-party security product.' -Source 'Invoke-WTDefenderRules' -Status 'Warning')
+    }
+
+    if ((@($defender.DefenderConfigChangeEvents).Count) -ge 1) {
+        $configLatest = @($defender.DefenderConfigChangeEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-DEFENDER-CONFIG-CHANGED' -Category 'Security' -Severity 'Info' -Title 'Defender configuration change events detected' -Description 'Microsoft Defender logged one or more configuration change events.' -Evidence @(
+            ('Count={0}' -f @($defender.DefenderConfigChangeEvents).Count),
+            ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $configLatest[0].TimeCreated)),
+            ('MessageShort={0}' -f $configLatest[0].MessageShort)
+        ) -Recommendation 'Review whether Defender configuration changes were expected or policy-driven.' -Source 'Invoke-WTDefenderRules' -Status 'Info')
+    }
+
+    if ($defender.FirewallStatusAvailable -eq $true -and $defender.FirewallAnyProfileDisabled -eq $true) {
+        $disabledProfiles = @($defender.FirewallProfiles | Where-Object { $_.Enabled -eq $false } | Select-Object -ExpandProperty Name)
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-FIREWALL-PROFILE-DISABLED' -Category 'Security' -Severity 'Medium' -Title 'Firewall profile disabled' -Description 'One or more firewall profiles are disabled.' -Evidence @(
+            ('DisabledProfiles={0}' -f ($disabledProfiles -join ', ')),
+            ('FirewallSummary={0}' -f $defender.FirewallSummary)
+        ) -Recommendation 'Verify whether firewall profile state is expected by policy.' -Source 'Invoke-WTDefenderRules' -Status 'Warning')
+    }
+    elseif ($defender.FirewallStatusAvailable -eq $true -and $defender.FirewallAllProfilesEnabled -eq $true) {
+        [void](Add-WTFinding -Report $Report -Id 'WT-SEC-FIREWALL-ENABLED' -Category 'Security' -Severity 'Info' -Title 'Firewall profiles enabled' -Description 'All detected firewall profiles are enabled.' -Evidence @(
+            ('FirewallSummary={0}' -f $defender.FirewallSummary)
+        ) -Recommendation 'No action required.' -Source 'Invoke-WTDefenderRules' -Status 'Pass')
+    }
 }
 
 function Get-WTSystemInfo {
@@ -4746,11 +5623,15 @@ function Invoke-WinTriage {
             Export-WTUpdateCsv -Report $report -UpdateInfo $report.Raw.Updates | Out-Null
         } | Out-Null
 
-        $report.Raw.Defender = [pscustomobject]@{
-            Status = 'NotImplemented'
-            RequiresAdmin = $true
+        $defenderRaw = Invoke-WTSafeCollector -Report $report -Name 'DefenderInfo' -ScriptBlock {
+            Get-WTDefenderInfo -Report $report -Days $Days -Mode $mode
         }
-        $report.Normalized.Defender = $report.Raw.Defender
+        if ($defenderRaw) {
+            $report.Raw.Defender = $defenderRaw
+        }
+        Invoke-WTSafeStep -Report $report -Name 'NormalizeDefender' -ScriptBlock {
+            $report.Normalized.Defender = ConvertTo-WTNormalizedDefenderInfo -DefenderInfo $report.Raw.Defender
+        } | Out-Null
 
         $report.Raw.Domain = [pscustomobject]@{
             IsDomainJoined = $report.Context.IsDomainJoined
@@ -4789,6 +5670,9 @@ function Invoke-WinTriage {
 
         Invoke-WTSafeStep -Report $report -Name 'UpdateRules' -ScriptBlock {
             Invoke-WTUpdateRules -Report $report
+        } | Out-Null
+        Invoke-WTSafeStep -Report $report -Name 'DefenderRules' -ScriptBlock {
+            Invoke-WTDefenderRules -Report $report
         } | Out-Null
         Invoke-WTSafeStep -Report $report -Name 'SystemRules' -ScriptBlock {
             Invoke-WTSystemRules -Report $report

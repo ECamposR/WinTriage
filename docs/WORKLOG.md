@@ -41,3 +41,5 @@
 - Bumped script version to `0.4.2` after refining execution reporting and exit-code policy.
 - Fixed a broken `Get-WTDisplayValue` call in Windows Update rules, hardened Markdown cell rendering with a reusable helper, and added a Markdown self-test plus required-function validation.
 - Bumped script version to `0.4.3` after hotfixing the runtime Markdown and function-resolution regressions.
+- Added a read-only security posture module for Microsoft Defender, Security Center antivirus inventory, firewall state, security services and Defender events, with Markdown, console and rule integration.
+- Bumped script version to `0.5.0` after integrating the security posture diagnostics module.
