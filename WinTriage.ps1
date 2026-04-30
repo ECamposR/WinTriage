@@ -1187,7 +1187,7 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($agent in $agentRows) {
-                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} |' -f (ConvertTo-WTMarkdownCell -Value $agent.AgentName), (ConvertTo-WTMarkdownCell -Value $agent.Category), (ConvertTo-WTMarkdownCell -Value $agent.StatusSummary), (ConvertTo-WTMarkdownCell -Value ($agent.Services -join '; ')), (ConvertTo-WTMarkdownCell -Value ($agent.Processes -join '; ')), (ConvertTo-WTMarkdownCell -Value $agent.RecentFailureCount))))
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} |' -f (ConvertTo-WTMarkdownCell -Value $agent.AgentName), (ConvertTo-WTMarkdownCell -Value $agent.Category), (ConvertTo-WTMarkdownCell -Value $agent.StatusSummary), (ConvertTo-WTMarkdownCell -Value ($agent.Services -join '; ')), (ConvertTo-WTMarkdownCell -Value ($agent.Processes -join '; ')), (ConvertTo-WTMarkdownCell -Value $agent.RecentFailureCount)))
             }
         }
         [void]$sb.AppendLine('')
@@ -1201,7 +1201,7 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($evt in $svcFailureRows) {
-                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'), (ConvertTo-WTMarkdownCell -Value $evt.Id), (ConvertTo-WTMarkdownCell -Value $evt.ServiceName), (ConvertTo-WTMarkdownCell -Value $evt.MessageShort))))
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'), (ConvertTo-WTMarkdownCell -Value $evt.Id), (ConvertTo-WTMarkdownCell -Value $evt.ServiceName), (ConvertTo-WTMarkdownCell -Value $evt.MessageShort)))
             }
         }
         [void]$sb.AppendLine('')
@@ -1215,7 +1215,7 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($evt in $svcInstallRows) {
-                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'), (ConvertTo-WTMarkdownCell -Value $evt.ServiceName), (ConvertTo-WTMarkdownCell -Value $evt.ServiceFileName), (ConvertTo-WTMarkdownCell -Value $evt.ServiceAccount))))
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'), (ConvertTo-WTMarkdownCell -Value $evt.ServiceName), (ConvertTo-WTMarkdownCell -Value $evt.ServiceFileName), (ConvertTo-WTMarkdownCell -Value $evt.ServiceAccount)))
             }
         }
         [void]$sb.AppendLine('')
@@ -1229,7 +1229,7 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($svc in $autoStoppedRows) {
-                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} |' -f (ConvertTo-WTMarkdownCell -Value $svc.Name), (ConvertTo-WTMarkdownCell -Value $svc.DisplayName), (ConvertTo-WTMarkdownCell -Value $svc.StartMode), (ConvertTo-WTMarkdownCell -Value $svc.State), (ConvertTo-WTMarkdownCell -Value $svc.PathName))))
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} |' -f (ConvertTo-WTMarkdownCell -Value $svc.Name), (ConvertTo-WTMarkdownCell -Value $svc.DisplayName), (ConvertTo-WTMarkdownCell -Value $svc.StartMode), (ConvertTo-WTMarkdownCell -Value $svc.State), (ConvertTo-WTMarkdownCell -Value $svc.PathName)))
             }
         }
         [void]$sb.AppendLine('')
@@ -1243,7 +1243,7 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($row in $crashCandidateRows) {
-                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} |' -f (ConvertTo-WTMarkdownCell -Value $row.Process), (ConvertTo-WTMarkdownCell -Value $row.Service), (ConvertTo-WTMarkdownCell -Value $row.DisplayName), (ConvertTo-WTMarkdownCell -Value $row.CrashCount), (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $row.LastCrash) -Fallback 'Unknown'))))
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} |' -f (ConvertTo-WTMarkdownCell -Value $row.Process), (ConvertTo-WTMarkdownCell -Value $row.Service), (ConvertTo-WTMarkdownCell -Value $row.DisplayName), (ConvertTo-WTMarkdownCell -Value $row.CrashCount), (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $row.LastCrash) -Fallback 'Unknown')))
             }
         }
         [void]$sb.AppendLine('')

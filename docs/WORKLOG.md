@@ -48,3 +48,4 @@
 - Corrected the runtime banner/version constant so the console now reports `0.5.1` instead of `0.5.0`.
 - Added a read-only services and agents diagnostics module with service inventory, SCM event parsing, corporate agent detection, duplicate/legacy agent heuristics, service/crash correlation and CSV/Markdown integration.
 - Bumped script version to `0.6.0` after integrating the services and agents module.
+- Fixed a Markdown export parser regression in the services section by removing stray parentheses from table rows.
