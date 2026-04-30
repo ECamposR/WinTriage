@@ -25,3 +25,5 @@
 - Repaired regression in APPCRASH/Application Error parsing so enriched process fields are populated again and crash summaries no longer collapse to `Unknown`.
 - Added a dedicated `Application Error 1000` parser path for Spanish faulting application names and paths so `mxdhcp.exe` style crashes enrich correctly again.
 - Bumped script version to `0.3.6` after restoring the Spanish `Application Error 1000` parser path.
+- Refined the Spanish `Application Error 1000` parser to use line-oriented matching and improved the internal warning path for future regressions.
+- Bumped script version to `0.3.7` after correcting the last pending kernel-uptime and boot-state semantics work.

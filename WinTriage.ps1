@@ -15,7 +15,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.3.6'
+$script:WTVersion = '0.3.7'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -203,6 +203,7 @@ function New-WTReportObject {
         }
         Raw = [ordered]@{
             System      = $null
+            PowerBoot   = $null
             Updates     = $null
             Defender    = $null
             Domain      = $null
@@ -213,6 +214,7 @@ function New-WTReportObject {
         }
         Normalized = [ordered]@{
             System      = $null
+            PowerBoot   = $null
             Updates     = $null
             Defender    = $null
             Domain      = $null
@@ -584,17 +586,22 @@ function Write-WTConsoleSummary {
     $readOnlyText = ConvertTo-WTYesNo -Value ([bool]$Report.Metadata.IsReadOnly)
     $fallbackText = ConvertTo-WTYesNo -Value ([bool]$Report.Metadata.OutputFallbackUsed)
     $osSummary = 'Unknown'
-    $uptimeText = 'Unknown'
+    $kernelUptimeText = 'Unknown'
     $diskText = 'Unknown'
     $ramText = 'Unknown'
+    $powerText = 'Fast Startup Unknown, recent shutdowns Unknown, unexpected Unknown'
     $eventsText = 'Unknown'
     $systemDriveLabel = 'C:'
+    $powerBoot = $Report.Normalized.PowerBoot
 
     if ($Report.Normalized.System -and $Report.Normalized.System.OSCaption) {
         $osSummary = '{0} build {1}' -f $Report.Normalized.System.OSCaption, (Get-WTSystemBuildText -SystemInfo $Report.Normalized.System)
     }
-    if ($Report.Normalized.System -and $Report.Normalized.System.UptimeDays -ne $null) {
-        $uptimeText = '{0} days' -f $Report.Normalized.System.UptimeDays
+    if ($powerBoot -and $powerBoot.KernelUptimeDays -ne $null) {
+        $kernelUptimeText = '{0} days' -f $powerBoot.KernelUptimeDays
+    }
+    elseif ($Report.Normalized.System -and $Report.Normalized.System.KernelUptimeDays -ne $null) {
+        $kernelUptimeText = '{0} days' -f $Report.Normalized.System.KernelUptimeDays
     }
     if ($Report.Normalized.System -and $Report.Normalized.System.SystemDrive) {
         $systemDriveLabel = $Report.Normalized.System.SystemDrive
@@ -613,6 +620,12 @@ function Write-WTConsoleSummary {
     }
     if ($Report.Normalized.Performance -and $Report.Normalized.Performance.FreeRamPercent -ne $null) {
         $ramText = '{0}% free' -f $Report.Normalized.Performance.FreeRamPercent
+    }
+    if ($powerBoot) {
+        $fastStartupText = ConvertTo-WTEnabledDisabledUnknown -Value $powerBoot.FastStartupEnabled
+        $recentShutdownCount = if ($powerBoot.RecentShutdownEventsCount -ne $null) { $powerBoot.RecentShutdownEventsCount } else { 'Unknown' }
+        $recentUnexpectedCount = if ($powerBoot.RecentUnexpectedShutdownEventsCount -ne $null) { $powerBoot.RecentUnexpectedShutdownEventsCount } else { 'Unknown' }
+        $powerText = 'Fast Startup {0}, recent shutdowns {1}, unexpected {2}' -f $fastStartupText, $recentShutdownCount, $recentUnexpectedCount
     }
     if ($Report.Normalized.Events) {
         if (@($Report.Normalized.Events.LogsUnavailable).Count -ge 2 -and @($Report.Normalized.Events.AllEvents).Count -eq 0) {
@@ -639,9 +652,10 @@ function Write-WTConsoleSummary {
         ('Critical: {0}  High: {1}  Medium: {2}  Low: {3}  Info: {4}  Skipped: {5}' -f $Report.Summary.Critical, $Report.Summary.High, $Report.Summary.Medium, $Report.Summary.Low, $Report.Summary.Info, $Report.Summary.Skipped),
         ('Findings: {0}  Errors: {1}  Warnings: {2}' -f @($Report.Findings).Count, @($Report.Execution.Errors).Count, @($Report.Execution.Warnings).Count),
         ('OS: {0}' -f $osSummary),
-        ('Uptime: {0}' -f $uptimeText),
+        ('Kernel uptime: {0}' -f $kernelUptimeText),
         ('Disk: {0}' -f $diskText),
         ('RAM: {0}' -f $ramText),
+        ('Power: {0}' -f $powerText),
         ('Events: {0}' -f $eventsText),
         ('Report directory: {0}' -f $Report.Metadata.ReportDirectory),
         ('JSON: {0}' -f $jsonPathText),
@@ -666,11 +680,12 @@ function Write-WTConsoleSummary {
     Write-Host $lines[6] -ForegroundColor Gray
     Write-Host $lines[7] -ForegroundColor Gray
     Write-Host $lines[8] -ForegroundColor Gray
-    Write-Host $lines[9] -ForegroundColor DarkGray
-    Write-Host $lines[10] -ForegroundColor Gray
+    Write-Host $lines[9] -ForegroundColor Gray
+    Write-Host $lines[10] -ForegroundColor DarkGray
     Write-Host $lines[11] -ForegroundColor Gray
-    Write-Host $lines[12] -ForegroundColor DarkGray
-    Write-Host $lines[13] -ForegroundColor Green
+    Write-Host $lines[12] -ForegroundColor Gray
+    Write-Host $lines[13] -ForegroundColor DarkGray
+    Write-Host $lines[14] -ForegroundColor Green
 }
 
 function Export-WTJsonReport {
@@ -727,8 +742,21 @@ function Export-WTMarkdownReport {
     [void]$sb.AppendLine(('* Version: {0}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.System.OSVersion)))
     $systemBuildText = Get-WTSystemBuildText -SystemInfo $Report.Normalized.System
     $systemInstallDateText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $Report.Normalized.System.InstallDate) -Fallback 'Not available'
-    $systemLastBootText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $Report.Normalized.System.LastBootUpTime) -Fallback 'Not available'
-    $systemUptimeText = if ($Report.Normalized.System.UptimeDays -ne $null) { '{0} days' -f $Report.Normalized.System.UptimeDays } else { 'Unknown' }
+    $powerBoot = $Report.Normalized.PowerBoot
+    $kernelLastBootText = 'Not available'
+    if ($powerBoot -and $powerBoot.KernelLastBootUpTime) {
+        $kernelLastBootText = ConvertTo-WTDisplayValue -Value $powerBoot.KernelLastBootUpTime -Fallback 'Not available'
+    }
+    elseif ($Report.Normalized.System -and $Report.Normalized.System.KernelLastBootUpTime) {
+        $kernelLastBootText = ConvertTo-WTDisplayValue -Value $Report.Normalized.System.KernelLastBootUpTime -Fallback 'Not available'
+    }
+    $kernelUptimeText = 'Unknown'
+    if ($powerBoot -and $powerBoot.KernelUptimeDays -ne $null) {
+        $kernelUptimeText = '{0} days' -f $powerBoot.KernelUptimeDays
+    }
+    elseif ($Report.Normalized.System -and $Report.Normalized.System.KernelUptimeDays -ne $null) {
+        $kernelUptimeText = '{0} days' -f $Report.Normalized.System.KernelUptimeDays
+    }
     [void]$sb.AppendLine(('* BuildNumber: {0}' -f (ConvertTo-WTDisplayValue -Value $systemBuildText)))
     [void]$sb.AppendLine(('* Architecture: {0}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.System.OSArchitecture)))
     [void]$sb.AppendLine(('* Hostname: {0}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.System.Hostname)))
@@ -737,9 +765,28 @@ function Export-WTMarkdownReport {
     [void]$sb.AppendLine(('* Serial Number: {0}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.System.SerialNumber)))
     [void]$sb.AppendLine(('* Domain/Workgroup: {0}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.System.DomainOrWorkgroup)))
     [void]$sb.AppendLine(('* InstallDate: {0}' -f $systemInstallDateText))
-    [void]$sb.AppendLine(('* LastBootUpTime: {0}' -f $systemLastBootText))
-    [void]$sb.AppendLine(('* Uptime: {0}' -f $systemUptimeText))
+    [void]$sb.AppendLine(('* KernelLastBootUpTime: {0}' -f $kernelLastBootText))
+    [void]$sb.AppendLine(('* Kernel uptime: {0}' -f $kernelUptimeText))
     [void]$sb.AppendLine(('* Virtual machine: {0}' -f (ConvertTo-WTYesNoUnknown -Value $Report.Normalized.System.IsVirtualMachine)))
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('## Power / Boot Overview')
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine(('* Kernel last boot time: {0}' -f $kernelLastBootText))
+    [void]$sb.AppendLine(('* Kernel uptime: {0}' -f $kernelUptimeText))
+    [void]$sb.AppendLine(('* Fast Startup enabled: {0}' -f (ConvertTo-WTEnabledDisabledUnknown -Value $powerBoot.FastStartupEnabled)))
+    [void]$sb.AppendLine(('* Recent boot events: {0}' -f (Get-WTArrayCountSafe -Value $powerBoot.BootEvents)))
+    [void]$sb.AppendLine(('* Recent shutdown events: {0}' -f (Get-WTArrayCountSafe -Value $powerBoot.ShutdownEvents)))
+    [void]$sb.AppendLine(('* Planned shutdown/restart events: {0}' -f (Get-WTArrayCountSafe -Value $powerBoot.PlannedShutdownEvents)))
+    [void]$sb.AppendLine(('* Unexpected shutdown events: {0}' -f (Get-WTArrayCountSafe -Value $powerBoot.UnexpectedShutdownEvents)))
+    [void]$sb.AppendLine(('* Sleep/hibernate events: {0}' -f (Get-WTArrayCountSafe -Value $powerBoot.SleepHibernateEvents)))
+    [void]$sb.AppendLine(('* Resume events: {0}' -f (Get-WTArrayCountSafe -Value $powerBoot.ResumeEvents)))
+    [void]$sb.AppendLine(('* Last boot event: {0}' -f (ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $powerBoot.LastBootEventTime) -Fallback 'Not available')))
+    [void]$sb.AppendLine(('* Last shutdown event: {0}' -f (ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $powerBoot.LastShutdownEventTime) -Fallback 'Not available')))
+    [void]$sb.AppendLine(('* Last planned shutdown event: {0}' -f (ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $powerBoot.LastPlannedShutdownEventTime) -Fallback 'Not available')))
+    [void]$sb.AppendLine(('* Last unexpected shutdown event: {0}' -f (ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $powerBoot.LastUnexpectedShutdownEventTime) -Fallback 'Not available')))
+    [void]$sb.AppendLine(('* Last resume event: {0}' -f (ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $powerBoot.LastResumeEventTime) -Fallback 'Not available')))
+    [void]$sb.AppendLine(('* Interpretation: {0}' -f (ConvertTo-WTDisplayValue -Value $powerBoot.PowerCycleInterpretation -Fallback 'Unknown')))
+    [void]$sb.AppendLine(('* Uptime interpretation: {0}' -f (ConvertTo-WTDisplayValue -Value $powerBoot.UptimeInterpretation -Fallback 'Unknown')))
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('## Disk Overview')
     [void]$sb.AppendLine('')
@@ -763,7 +810,14 @@ function Export-WTMarkdownReport {
     [void]$sb.AppendLine(('* Logical processors: {0}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.Performance.NumberOfLogicalProcessors)))
     [void]$sb.AppendLine(('* Physical processors: {0}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.Performance.NumberOfProcessors)))
     [void]$sb.AppendLine(('* CPU load: {0}' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.Performance.CpuLoadPercent)))
-    [void]$sb.AppendLine(('* Uptime: {0} days' -f (ConvertTo-WTDisplayValue -Value $Report.Normalized.Performance.UptimeDays)))
+    $performanceKernelUptimeText = 'Unknown'
+    if ($Report.Normalized.Performance -and $Report.Normalized.Performance.KernelUptimeDays -ne $null) {
+        $performanceKernelUptimeText = '{0} days' -f $Report.Normalized.Performance.KernelUptimeDays
+    }
+    elseif ($Report.Normalized.Performance -and $Report.Normalized.Performance.UptimeDays -ne $null) {
+        $performanceKernelUptimeText = '{0} days' -f $Report.Normalized.Performance.UptimeDays
+    }
+    [void]$sb.AppendLine(('* Kernel uptime: {0}' -f $performanceKernelUptimeText))
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('Top processes by memory:')
     $memoryRows = @($Report.Normalized.Performance.TopProcessesByMemory | Where-Object { $_ })
@@ -937,6 +991,24 @@ function ConvertTo-WTYesNoUnknown {
     return 'Unknown'
 }
 
+function ConvertTo-WTEnabledDisabledUnknown {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($Value -eq $true -or $Value -eq 'True') {
+        return 'Enabled'
+    }
+
+    if ($Value -eq $false -or $Value -eq 'False') {
+        return 'Disabled'
+    }
+
+    return 'Unknown'
+}
+
 function Get-WTSystemBuildText {
     [CmdletBinding()]
     param(
@@ -1043,7 +1115,9 @@ function Get-WTSystemInfo {
     $windowsDirectory = $null
     $installDate = $null
     $lastBoot = $null
+    $kernelLastBootUpTime = $null
     $uptimeDays = $null
+    $kernelUptimeDays = $null
     $partOfDomain = $null
     $domain = $null
     $workgroup = $null
@@ -1064,6 +1138,8 @@ function Get-WTSystemInfo {
         $installDate = ConvertTo-WTDateTimeString -Value $os.InstallDate
         $lastBoot = ConvertTo-WTDateTimeString -Value $os.LastBootUpTime
         $uptimeDays = ConvertTo-WTUptimeDays -LastBootUpTime $os.LastBootUpTime
+        $kernelLastBootUpTime = $lastBoot
+        $kernelUptimeDays = $uptimeDays
     }
 
     if ($computer) {
@@ -1114,7 +1190,9 @@ function Get-WTSystemInfo {
         OSArchitecture        = if ($os) { ConvertTo-WTDisplayValue -Value $os.OSArchitecture } else { $null }
         InstallDate           = $installDate
         LastBootUpTime        = $lastBoot
+        KernelLastBootUpTime  = $kernelLastBootUpTime
         UptimeDays            = $uptimeDays
+        KernelUptimeDays      = $kernelUptimeDays
         Manufacturer          = if ($manufacturer) { $manufacturer } else { $null }
         Model                 = if ($model) { $model } else { $null }
         SerialNumber          = if ($serialNumber) { $serialNumber } else { $null }
@@ -1158,7 +1236,9 @@ function ConvertTo-WTNormalizedSystemInfo {
             OSArchitecture            = 'Unknown'
             InstallDate               = $null
             LastBootUpTime            = $null
+            KernelLastBootUpTime      = $null
             UptimeDays                = $null
+            KernelUptimeDays          = $null
             Manufacturer              = 'Unknown'
             Model                     = 'Unknown'
             SerialNumber              = 'Unknown'
@@ -1224,7 +1304,9 @@ function ConvertTo-WTNormalizedSystemInfo {
         OSArchitecture            = ConvertTo-WTDisplayValue -Value $SystemInfo.OSArchitecture
         InstallDate               = $SystemInfo.InstallDate
         LastBootUpTime            = $SystemInfo.LastBootUpTime
+        KernelLastBootUpTime      = $SystemInfo.KernelLastBootUpTime
         UptimeDays                = $SystemInfo.UptimeDays
+        KernelUptimeDays          = $SystemInfo.KernelUptimeDays
         Manufacturer              = ConvertTo-WTDisplayValue -Value $SystemInfo.Manufacturer
         Model                     = ConvertTo-WTDisplayValue -Value $SystemInfo.Model
         SerialNumber              = ConvertTo-WTDisplayValue -Value $SystemInfo.SerialNumber
@@ -1263,6 +1345,8 @@ function ConvertTo-WTNormalizedPerformanceInfo {
             FreeRamPercent           = $null
             UsedRamPercent           = $null
             UptimeDays               = $null
+            KernelLastBootUpTime     = $null
+            KernelUptimeDays         = $null
             ProcessorName            = 'Unknown'
             NumberOfLogicalProcessors = $null
             NumberOfProcessors       = $null
@@ -1293,6 +1377,8 @@ function ConvertTo-WTNormalizedPerformanceInfo {
         FreeRamPercent         = $freePercent
         UsedRamPercent         = $usedPercent
         UptimeDays             = $PerformanceInfo.UptimeDays
+        KernelLastBootUpTime    = ConvertTo-WTDisplayValue -Value $PerformanceInfo.KernelLastBootUpTime
+        KernelUptimeDays        = $PerformanceInfo.KernelUptimeDays
         ProcessorName          = ConvertTo-WTDisplayValue -Value $PerformanceInfo.ProcessorName
         NumberOfLogicalProcessors = $PerformanceInfo.NumberOfLogicalProcessors
         NumberOfProcessors     = $PerformanceInfo.NumberOfProcessors
@@ -1507,12 +1593,195 @@ function Get-WTPerformanceInfo {
         FreeRamPercent         = $freeRamPercent
         UsedRamPercent         = $usedRamPercent
         UptimeDays             = $uptimeDays
+        KernelLastBootUpTime   = if ($os) { ConvertTo-WTDateTimeString -Value $os.LastBootUpTime } else { $null }
+        KernelUptimeDays       = $uptimeDays
         ProcessorName          = if ($processorName) { $processorName } else { $null }
         NumberOfLogicalProcessors = $logicalProcessors
         NumberOfProcessors     = $physicalProcessors
         CpuLoadPercent         = $cpuLoadPercent
         TopProcessesByCPU      = $topProcessesByCpu
         TopProcessesByMemory   = $topProcessesByMemory
+    }
+}
+
+function Get-WTPowerBootInfo {
+    [CmdletBinding()]
+    param(
+        [ValidateRange(1, 90)]
+        [int]$Days = 7,
+
+        [AllowNull()]
+        [string]$Mode = 'Standard'
+    )
+
+    $windowEnd = Get-Date
+    $windowStart = $windowEnd.AddDays(-1 * [math]::Abs($Days))
+    $limit = Get-WTEventCollectionLimit -Mode $Mode
+    $os = $null
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    }
+    catch {
+        $os = $null
+    }
+
+    $kernelLastBootUpTime = $null
+    $kernelUptimeDays = $null
+    if ($os) {
+        $kernelLastBootUpTime = ConvertTo-WTDateTimeString -Value $os.LastBootUpTime
+        $kernelUptimeDays = ConvertTo-WTUptimeDays -LastBootUpTime $os.LastBootUpTime
+    }
+
+    $fastStartupEnabled = $null
+    try {
+        $hiberboot = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction Stop
+        if ($null -ne $hiberboot.HiberbootEnabled) {
+            if ([int]$hiberboot.HiberbootEnabled -eq 1) {
+                $fastStartupEnabled = $true
+            }
+            elseif ([int]$hiberboot.HiberbootEnabled -eq 0) {
+                $fastStartupEnabled = $false
+            }
+        }
+    }
+    catch {
+        $fastStartupEnabled = $null
+    }
+
+    $systemIds = @(12, 13, 41, 42, 107, 1074, 6005, 6006, 6008)
+    $rawEvents = @()
+    try {
+        $rawEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $windowStart; Id = $systemIds } -MaxEvents ($limit + 1) -ErrorAction Stop)
+    }
+    catch {
+        $rawEvents = @()
+    }
+
+    if ($rawEvents.Count -gt $limit) {
+        $rawEvents = @($rawEvents | Select-Object -First $limit)
+    }
+
+    $events = @()
+    foreach ($event in $rawEvents) {
+        $events += ConvertTo-WTEventRecord -EventRecord $event
+    }
+
+    $bootEvents = @($events | Where-Object { $_.Id -in @(12, 6005) -and ($_.ProviderName -match 'Kernel-General|EventLog') })
+    $shutdownEvents = @($events | Where-Object { $_.Id -in @(13, 6006, 1074) -and ($_.ProviderName -match 'Kernel-General|EventLog|User32') })
+    $plannedShutdownEvents = @($events | Where-Object { $_.Id -eq 1074 -and $_.ProviderName -eq 'User32' })
+    $unexpectedShutdownEvents = @($events | Where-Object { $_.Id -in @(41, 6008) -and ($_.ProviderName -match 'Kernel-Power|EventLog') })
+    $sleepHibernateEvents = @($events | Where-Object { $_.Id -eq 42 -and $_.ProviderName -match 'Kernel-Power' })
+    $resumeEvents = @($events | Where-Object { $_.Id -eq 107 -and $_.ProviderName -match 'Kernel-Power' })
+
+    return [pscustomobject]@{
+        WindowStart                   = $windowStart
+        WindowEnd                     = $windowEnd
+        Days                          = $Days
+        FastStartupEnabled            = $fastStartupEnabled
+        KernelLastBootUpTime          = $kernelLastBootUpTime
+        KernelUptimeDays              = $kernelUptimeDays
+        Events                        = @($events)
+        BootEvents                    = @($bootEvents)
+        ShutdownEvents                = @($shutdownEvents)
+        PlannedShutdownEvents         = @($plannedShutdownEvents)
+        UnexpectedShutdownEvents      = @($unexpectedShutdownEvents)
+        SleepHibernateEvents          = @($sleepHibernateEvents)
+        ResumeEvents                  = @($resumeEvents)
+        RecentBootEventsCount         = @($bootEvents).Count
+        RecentShutdownEventsCount     = @($shutdownEvents).Count
+        RecentPlannedShutdownEventsCount = @($plannedShutdownEvents).Count
+        RecentUnexpectedShutdownEventsCount = @($unexpectedShutdownEvents).Count
+        RecentSleepHibernateEventsCount = @($sleepHibernateEvents).Count
+        RecentResumeEventsCount       = @($resumeEvents).Count
+        LastBootEventTime             = if ($bootEvents.Count -gt 0) { ($bootEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1).TimeCreated } else { $null }
+        LastShutdownEventTime         = if ($shutdownEvents.Count -gt 0) { ($shutdownEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1).TimeCreated } else { $null }
+        LastPlannedShutdownEventTime  = if ($plannedShutdownEvents.Count -gt 0) { ($plannedShutdownEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1).TimeCreated } else { $null }
+        LastUnexpectedShutdownEventTime = if ($unexpectedShutdownEvents.Count -gt 0) { ($unexpectedShutdownEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1).TimeCreated } else { $null }
+        LastResumeEventTime           = if ($resumeEvents.Count -gt 0) { ($resumeEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1).TimeCreated } else { $null }
+        PowerCycleInterpretation      = $null
+        UptimeInterpretation          = $null
+    }
+}
+
+function ConvertTo-WTNormalizedPowerBootInfo {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [psobject]$PowerBootInfo
+    )
+
+    if (-not $PowerBootInfo) {
+        return [pscustomobject]@{
+            KernelLastBootUpTime              = $null
+            KernelUptimeDays                  = $null
+            FastStartupEnabled                = $null
+            RecentBootEventsCount             = 0
+            RecentShutdownEventsCount         = 0
+            RecentPlannedShutdownEventsCount  = 0
+            RecentUnexpectedShutdownEventsCount = 0
+            RecentSleepHibernateEventsCount   = 0
+            RecentResumeEventsCount           = 0
+            LastBootEventTime                 = $null
+            LastShutdownEventTime             = $null
+            LastPlannedShutdownEventTime      = $null
+            LastUnexpectedShutdownEventTime   = $null
+            LastResumeEventTime               = $null
+            PowerCycleInterpretation          = 'No recent shutdown/start events found'
+            UptimeInterpretation              = 'Kernel uptime is based on LastBootUpTime. Fast Startup status could not be determined.'
+            BootEvents                        = @()
+            ShutdownEvents                    = @()
+            PlannedShutdownEvents             = @()
+            UnexpectedShutdownEvents          = @()
+            SleepHibernateEvents              = @()
+            ResumeEvents                      = @()
+            Events                            = @()
+        }
+    }
+
+    $fastStartupText = ConvertTo-WTEnabledDisabledUnknown -Value $PowerBootInfo.FastStartupEnabled
+    $powerCycleInterpretation = 'No recent shutdown/start events found'
+    if ($PowerBootInfo.RecentUnexpectedShutdownEventsCount -gt 0) {
+        $powerCycleInterpretation = 'Unexpected shutdown detected'
+    }
+    elseif ($PowerBootInfo.RecentShutdownEventsCount -gt 0 -or $PowerBootInfo.RecentBootEventsCount -gt 0) {
+        $powerCycleInterpretation = 'Recent shutdown/start events found'
+    }
+    if ($fastStartupText -eq 'Enabled') {
+        $powerCycleInterpretation = '{0}. Fast Startup may cause kernel uptime to persist across user shutdowns.' -f $powerCycleInterpretation
+    }
+
+    $uptimeInterpretation = 'Kernel uptime is based on LastBootUpTime. Fast Startup status could not be determined.'
+    if ($fastStartupText -eq 'Enabled') {
+        $uptimeInterpretation = 'Kernel uptime may not reset after user shutdown because Fast Startup is enabled.'
+    }
+    elseif ($fastStartupText -eq 'Disabled') {
+        $uptimeInterpretation = 'Kernel uptime usually represents time since last full boot.'
+    }
+
+    return [pscustomobject]@{
+        KernelLastBootUpTime              = ConvertTo-WTDisplayValue -Value $PowerBootInfo.KernelLastBootUpTime
+        KernelUptimeDays                  = $PowerBootInfo.KernelUptimeDays
+        FastStartupEnabled                = $PowerBootInfo.FastStartupEnabled
+        RecentBootEventsCount             = [int]$PowerBootInfo.RecentBootEventsCount
+        RecentShutdownEventsCount         = [int]$PowerBootInfo.RecentShutdownEventsCount
+        RecentPlannedShutdownEventsCount  = [int]$PowerBootInfo.RecentPlannedShutdownEventsCount
+        RecentUnexpectedShutdownEventsCount = [int]$PowerBootInfo.RecentUnexpectedShutdownEventsCount
+        RecentSleepHibernateEventsCount   = [int]$PowerBootInfo.RecentSleepHibernateEventsCount
+        RecentResumeEventsCount           = [int]$PowerBootInfo.RecentResumeEventsCount
+        LastBootEventTime                 = $PowerBootInfo.LastBootEventTime
+        LastShutdownEventTime             = $PowerBootInfo.LastShutdownEventTime
+        LastPlannedShutdownEventTime      = $PowerBootInfo.LastPlannedShutdownEventTime
+        LastUnexpectedShutdownEventTime   = $PowerBootInfo.LastUnexpectedShutdownEventTime
+        LastResumeEventTime               = $PowerBootInfo.LastResumeEventTime
+        PowerCycleInterpretation          = $powerCycleInterpretation
+        UptimeInterpretation              = $uptimeInterpretation
+        BootEvents                        = @($PowerBootInfo.BootEvents)
+        ShutdownEvents                    = @($PowerBootInfo.ShutdownEvents)
+        PlannedShutdownEvents             = @($PowerBootInfo.PlannedShutdownEvents)
+        UnexpectedShutdownEvents          = @($PowerBootInfo.UnexpectedShutdownEvents)
+        SleepHibernateEvents              = @($PowerBootInfo.SleepHibernateEvents)
+        ResumeEvents                      = @($PowerBootInfo.ResumeEvents)
+        Events                            = @($PowerBootInfo.Events)
     }
 }
 
@@ -1557,13 +1826,67 @@ function Invoke-WTSystemRules {
         Add-WTFinding -Report $Report -Id 'WT-SYS-VM-INFO' -Category 'System' -Severity 'Info' -Title 'Virtual machine detected' -Description 'The machine appears to be virtualized based on model and manufacturer heuristics.' -Evidence @("Manufacturer=$($system.Manufacturer)", "Model=$($system.Model)") -Recommendation 'No action required.' -Source 'Invoke-WTSystemRules' -Status 'Info'
     }
 
-    if ($system.UptimeDays -ne $null) {
-        if ($system.UptimeDays -ge 30) {
-            Add-WTFinding -Report $Report -Id 'WT-SYS-UPTIME-VERY-LONG' -Category 'System' -Severity 'Medium' -Title 'System uptime is very long' -Description 'The system has been running for 30 days or more.' -Evidence @("UptimeDays=$($system.UptimeDays)") -Recommendation 'Confirm whether a reboot is pending or scheduled maintenance is overdue.' -Source 'Invoke-WTSystemRules' -Status 'Warning'
+    $powerBoot = $Report.Normalized.PowerBoot
+    $kernelUptimeDays = $null
+    if ($powerBoot -and $powerBoot.KernelUptimeDays -ne $null) {
+        $kernelUptimeDays = $powerBoot.KernelUptimeDays
+    }
+    elseif ($system.KernelUptimeDays -ne $null) {
+        $kernelUptimeDays = $system.KernelUptimeDays
+    }
+    elseif ($system.UptimeDays -ne $null) {
+        $kernelUptimeDays = $system.UptimeDays
+    }
+
+    $fastStartupEnabled = $null
+    if ($powerBoot) {
+        $fastStartupEnabled = $powerBoot.FastStartupEnabled
+    }
+
+    if ($kernelUptimeDays -ne $null) {
+        if ($kernelUptimeDays -ge 30) {
+            $uptimeSeverity = 'Medium'
+            $uptimeStatus = 'Warning'
+            if ($fastStartupEnabled -eq $true) {
+                $uptimeSeverity = 'Low'
+                $uptimeStatus = 'Info'
+            }
+            Add-WTFinding -Report $Report -Id 'WT-SYS-UPTIME-VERY-LONG' -Category 'System' -Severity $uptimeSeverity -Title 'Kernel uptime is very long' -Description 'The kernel has been active for 30 days or more. This may reflect a full boot delay or preserved kernel state from Fast Startup.' -Evidence @("KernelUptimeDays=$kernelUptimeDays", ('FastStartupEnabled={0}' -f (ConvertTo-WTEnabledDisabledUnknown -Value $fastStartupEnabled))) -Recommendation 'Interpret this as kernel uptime, not necessarily physical power-on time. Correlate with restart and shutdown history.' -Source 'Invoke-WTSystemRules' -Status $uptimeStatus
         }
-        elseif ($system.UptimeDays -ge 14) {
-            Add-WTFinding -Report $Report -Id 'WT-SYS-UPTIME-LONG' -Category 'System' -Severity 'Low' -Title 'System uptime is long' -Description 'The system has been running for 14 days or more.' -Evidence @("UptimeDays=$($system.UptimeDays)") -Recommendation 'No immediate action required, but verify update and maintenance posture.' -Source 'Invoke-WTSystemRules' -Status 'Warning'
+        elseif ($kernelUptimeDays -ge 14) {
+            $uptimeSeverity = 'Low'
+            $uptimeStatus = 'Warning'
+            if ($fastStartupEnabled -eq $true) {
+                $uptimeSeverity = 'Info'
+                $uptimeStatus = 'Info'
+            }
+            Add-WTFinding -Report $Report -Id 'WT-SYS-UPTIME-LONG' -Category 'System' -Severity $uptimeSeverity -Title 'Kernel uptime is long' -Description 'The kernel has been active for 14 days or more. Fast Startup can preserve kernel state across normal user shutdowns.' -Evidence @("KernelUptimeDays=$kernelUptimeDays", ('FastStartupEnabled={0}' -f (ConvertTo-WTEnabledDisabledUnknown -Value $fastStartupEnabled))) -Recommendation 'Use kernel uptime together with shutdown and restart events for interpretation.' -Source 'Invoke-WTSystemRules' -Status $uptimeStatus
         }
+    }
+}
+
+function Invoke-WTPowerBootRules {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Report
+    )
+
+    $powerBoot = $Report.Normalized.PowerBoot
+    if (-not $powerBoot) {
+        return
+    }
+
+    if ($powerBoot.FastStartupEnabled -eq $true) {
+        Add-WTFinding -Report $Report -Id 'WT-PWR-FAST-STARTUP-INFO' -Category 'PowerBoot' -Severity 'Info' -Title 'Fast Startup is enabled' -Description 'Windows Fast Startup is enabled. Kernel uptime may not reset after normal user shutdowns.' -Evidence @("FastStartupEnabled=true", ('KernelUptimeDays={0}' -f (ConvertTo-WTDisplayValue -Value $powerBoot.KernelUptimeDays)), ('RecentShutdownEventsCount={0}' -f $powerBoot.RecentShutdownEventsCount)) -Recommendation 'Do not interpret kernel uptime as physical power-on time. Use restart events and power state history for context.' -Source 'Invoke-WTPowerBootRules' -Status 'Info'
+    }
+
+    if ($powerBoot.RecentShutdownEventsCount -gt 0 -or $powerBoot.RecentPlannedShutdownEventsCount -gt 0) {
+        Add-WTFinding -Report $Report -Id 'WT-PWR-RECENT-SHUTDOWNS' -Category 'PowerBoot' -Severity 'Info' -Title 'Recent shutdown or restart events detected' -Description 'Windows logged normal shutdown or restart events during the analysis window.' -Evidence @("Count=$($powerBoot.RecentShutdownEventsCount)", ('LastShutdownEventTime={0}' -f (ConvertTo-WTDateTimeString -Value $powerBoot.LastShutdownEventTime)), ('LastPlannedShutdownEventTime={0}' -f (ConvertTo-WTDateTimeString -Value $powerBoot.LastPlannedShutdownEventTime))) -Recommendation 'Correlate with user reports and remote management history.' -Source 'Invoke-WTPowerBootRules' -Status 'Info'
+    }
+
+    if ($powerBoot.RecentUnexpectedShutdownEventsCount -gt 0) {
+        Add-WTFinding -Report $Report -Id 'WT-PWR-UNEXPECTED-SHUTDOWN' -Category 'PowerBoot' -Severity 'High' -Title 'Unexpected shutdown or power loss detected' -Description 'Windows logged unexpected shutdown or Kernel-Power events.' -Evidence @("Count=$($powerBoot.RecentUnexpectedShutdownEventsCount)", ('LastUnexpectedShutdownEventTime={0}' -f (ConvertTo-WTDateTimeString -Value $powerBoot.LastUnexpectedShutdownEventTime))) -Recommendation 'Investigate power loss, forced shutdown, freeze, BSOD, storage or hardware instability.' -Source 'Invoke-WTPowerBootRules' -Status 'Warning'
     }
 }
 
@@ -1867,7 +2190,7 @@ function Get-WTApplicationErrorProcessInfo {
     if (-not [string]::IsNullOrWhiteSpace($Message)) {
         $texts += $Message
     }
-    if (-not [string]::IsNullOrWhiteSpace($MessageShort)) {
+    if (-not [string]::IsNullOrWhiteSpace($MessageShort) -and $MessageShort -ne $Message) {
         $texts += $MessageShort
     }
 
@@ -1879,59 +2202,77 @@ function Get-WTApplicationErrorProcessInfo {
         }
     }
 
-    $namePatterns = @(
-        'Nombre de aplicación con errores:\s*(?<name>[^,\r\n]+)',
-        'Faulting application name:\s*(?<name>[^,\r\n]+)'
-    )
-    $pathPatterns = @(
-        'Ruta de aplicación con errores:\s*(?<path>.+?)(?=\r?\n(?:Ruta de módulo con errores:|Id\. de informe:|Nombre completo del paquete con errores:|Faulting module path:|Report Id:|Faulting package full name:)|$)',
-        'Faulting application path:\s*(?<path>.+?)(?=\r?\n(?:Faulting module path:|Report Id:|Faulting package full name:|Id\. de informe:)|$)',
-        'Ruta de módulo con errores:\s*(?<path>.+?)(?=\r?\n(?:Id\. de informe:|Nombre completo del paquete con errores:|Report Id:|Faulting package full name:)|$)',
-        'Faulting module path:\s*(?<path>.+?)(?=\r?\n(?:Report Id:|Faulting package full name:|Id\. de informe:)|$)'
-    )
-
     $processName = $null
     $processPath = $null
     $sourcePattern = $null
 
+    $nameRules = @(
+        [pscustomobject]@{
+            Pattern = '^\s*Nombre de aplicación con errores:\s*(?<name>[^,\r\n]+)'
+            Source  = 'SpanishFaultingApplicationName'
+        },
+        [pscustomobject]@{
+            Pattern = '^\s*Faulting application name:\s*(?<name>[^,\r\n]+)'
+            Source  = 'EnglishFaultingApplicationName'
+        }
+    )
+
+    $pathRules = @(
+        [pscustomobject]@{
+            Pattern = '^\s*Ruta de aplicación con errores:\s*(?<path>[^\r\n]+)'
+            Source  = 'SpanishFaultingApplicationPath'
+        },
+        [pscustomobject]@{
+            Pattern = '^\s*Faulting application path:\s*(?<path>[^\r\n]+)'
+            Source  = 'EnglishFaultingApplicationPath'
+        },
+        [pscustomobject]@{
+            Pattern = '^\s*Ruta de módulo con errores:\s*(?<path>[^\r\n]+)'
+            Source  = 'SpanishFaultingModulePath'
+        },
+        [pscustomobject]@{
+            Pattern = '^\s*Faulting module path:\s*(?<path>[^\r\n]+)'
+            Source  = 'EnglishFaultingModulePath'
+        }
+    )
+
     foreach ($text in $texts) {
-        foreach ($pattern in $namePatterns) {
-            if (-not $processName -and $text -match $pattern) {
-                $candidateName = Normalize-WTProcessName -Value $Matches.name -RequireExecutable
-                if ($candidateName) {
-                    $processName = $candidateName
-                    if (-not $sourcePattern) {
-                        if ($pattern -like 'Nombre de aplicación con errores:*') {
-                            $sourcePattern = 'SpanishFaultingApplicationName'
-                        }
-                        else {
-                            $sourcePattern = 'EnglishFaultingApplicationName'
+        $lines = @($text -split '\r?\n')
+        foreach ($line in $lines) {
+            if (-not $processName) {
+                foreach ($rule in $nameRules) {
+                    $match = [regex]::Match($line, $rule.Pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                    if ($match.Success) {
+                        $candidateName = Normalize-WTProcessName -Value $match.Groups['name'].Value -RequireExecutable
+                        if ($candidateName) {
+                            $processName = $candidateName
+                            if (-not $sourcePattern) {
+                                $sourcePattern = $rule.Source
+                            }
+                            break
                         }
                     }
                 }
             }
-        }
 
-        foreach ($pattern in $pathPatterns) {
-            if (-not $processPath -and $text -match $pattern) {
-                $candidatePath = Normalize-WTProcessPath -Value $Matches.path
-                if ($candidatePath) {
-                    $processPath = $candidatePath
-                    if (-not $sourcePattern) {
-                        if ($pattern -like 'Ruta de aplicación con errores:*') {
-                            $sourcePattern = 'SpanishFaultingApplicationPath'
-                        }
-                        elseif ($pattern -like 'Ruta de módulo con errores:*') {
-                            $sourcePattern = 'SpanishFaultingModulePath'
-                        }
-                        elseif ($pattern -like 'Faulting application path:*') {
-                            $sourcePattern = 'EnglishFaultingApplicationPath'
-                        }
-                        else {
-                            $sourcePattern = 'EnglishFaultingModulePath'
+            if (-not $processPath) {
+                foreach ($rule in $pathRules) {
+                    $match = [regex]::Match($line, $rule.Pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                    if ($match.Success) {
+                        $candidatePath = Normalize-WTProcessPath -Value $match.Groups['path'].Value
+                        if ($candidatePath) {
+                            $processPath = $candidatePath
+                            if (-not $sourcePattern) {
+                                $sourcePattern = $rule.Source
+                            }
+                            break
                         }
                     }
                 }
+            }
+
+            if ($processName -and $processPath) {
+                break
             }
         }
 
@@ -1993,7 +2334,7 @@ function Get-WTEventProcessName {
         if (-not [string]::IsNullOrWhiteSpace($Message)) {
             $texts += $Message
         }
-        if (-not [string]::IsNullOrWhiteSpace($MessageShort)) {
+        if (-not [string]::IsNullOrWhiteSpace($MessageShort) -and $MessageShort -ne $Message) {
             $texts += $MessageShort
         }
 
@@ -2488,7 +2829,7 @@ function Invoke-WTEventRules {
         return
     }
 
-    if (@($events.UnexpectedShutdownEvents).Count -gt 0) {
+    if (@($events.UnexpectedShutdownEvents).Count -gt 0 -and -not $Report.Normalized.PowerBoot) {
         $ids = @($events.UnexpectedShutdownEvents | Select-Object -ExpandProperty Id -Unique | Sort-Object)
         $latest = @($events.UnexpectedShutdownEvents | Sort-Object -Property TimeCreated -Descending | Select-Object -First 1)
         Add-WTFinding -Report $Report -Id 'WT-EVT-UNEXPECTED-SHUTDOWN' -Category 'Events' -Severity 'High' -Title 'Unexpected shutdown or power loss detected' -Description 'Windows logged one or more unexpected shutdown or Kernel-Power events within the analysis window.' -Evidence @("Count=$(@($events.UnexpectedShutdownEvents).Count)", ('LastEvent={0}' -f (ConvertTo-WTDateTimeString -Value $latest[0].TimeCreated)), ('Ids={0}' -f ($ids -join ', '))) -Recommendation 'Review whether the device experienced power loss, forced shutdown, freeze, crash, or hardware instability. Correlate with BugCheck and Disk events.' -Source 'Invoke-WTEventRules' -Status 'Warning'
@@ -2693,6 +3034,16 @@ function Invoke-WinTriage {
             } | Out-Null
         }
 
+        $powerBootRaw = Invoke-WTSafeCollector -Report $report -Name 'PowerBootInfo' -ScriptBlock {
+            Get-WTPowerBootInfo -Days $Days -Mode $mode
+        }
+        if ($powerBootRaw) {
+            $report.Raw.PowerBoot = $powerBootRaw
+            Invoke-WTSafeStep -Report $report -Name 'NormalizePowerBoot' -ScriptBlock {
+                $report.Normalized.PowerBoot = ConvertTo-WTNormalizedPowerBootInfo -PowerBootInfo $report.Raw.PowerBoot
+            } | Out-Null
+        }
+
         $eventRaw = Invoke-WTSafeCollector -Report $report -Name 'EventInfo' -ScriptBlock {
             Get-WTEventInfo -Report $report -Days $Days -Mode $mode
         }
@@ -2707,19 +3058,26 @@ function Invoke-WinTriage {
         } | Out-Null
 
         $eventProcessParsingWarningNeeded = $false
+        $eventProcessParsingWarningMessage = $null
         foreach ($evt in @($report.Normalized.Events.ApplicationCrashEvents)) {
             if (-not $evt) {
                 continue
             }
             $hasProcessPattern = $false
             if ($evt.ProviderName -eq 'Application Error' -and $evt.Id -eq 1000 -and -not [string]::IsNullOrWhiteSpace($evt.Message)) {
-                if ($evt.Message -match 'Nombre de aplicación con errores:|Faulting application name:') {
+                if ($evt.Message -match 'Nombre de aplicación con errores:') {
                     $hasProcessPattern = $true
+                    $eventProcessParsingWarningMessage = 'Application Error event contains a Spanish faulting application name but process extraction failed.'
+                }
+                elseif ($evt.Message -match 'Faulting application name:') {
+                    $hasProcessPattern = $true
+                    $eventProcessParsingWarningMessage = 'Application Error event contains an English faulting application name but process extraction failed.'
                 }
             }
             elseif ($evt.ProviderName -eq 'Windows Error Reporting' -and $evt.Id -eq 1001) {
                 if (($evt.WerEventName -eq 'APPCRASH') -or ($evt.Message -match 'Nombre de evento:\s*APPCRASH|Event Name:\s*APPCRASH')) {
                     $hasProcessPattern = $true
+                    $eventProcessParsingWarningMessage = 'Windows Error Reporting APPCRASH event contains a process name pattern but process extraction failed.'
                 }
             }
 
@@ -2730,7 +3088,10 @@ function Invoke-WinTriage {
         }
 
         if ($eventProcessParsingWarningNeeded) {
-            Add-WTExecutionWarning -Report $report -Scope 'EventProcessParsing' -Message 'Application Error event contains a Spanish faulting application name but process extraction failed.'
+            if ([string]::IsNullOrWhiteSpace($eventProcessParsingWarningMessage)) {
+                $eventProcessParsingWarningMessage = 'Application crash event contains a process name pattern but process extraction failed.'
+            }
+            Add-WTExecutionWarning -Report $report -Scope 'EventProcessParsing' -Message $eventProcessParsingWarningMessage
         }
 
         $report.Raw.Updates = [pscustomobject]@{
@@ -2788,6 +3149,9 @@ function Invoke-WinTriage {
         } | Out-Null
         Invoke-WTSafeStep -Report $report -Name 'PerformanceRules' -ScriptBlock {
             Invoke-WTPerformanceRules -Report $report
+        } | Out-Null
+        Invoke-WTSafeStep -Report $report -Name 'PowerBootRules' -ScriptBlock {
+            Invoke-WTPowerBootRules -Report $report
         } | Out-Null
         Invoke-WTSafeStep -Report $report -Name 'EventRules' -ScriptBlock {
             Invoke-WTEventRules -Report $report
