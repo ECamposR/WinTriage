@@ -19,3 +19,5 @@
 - Refined event classification to reduce WER false positives, added process extraction and crash summaries, and made Markdown counts more robust.
 - Hotfixed a PowerShell parser error in event sorting and bumped the script version to `0.3.2`.
 - Replaced invalid `Sort-Object` syntax with PowerShell 5.1-compatible property hashtables to keep the script parseable.
+- Refined event process extraction for Spanish Application Error 1000 messages, stabilized Markdown `Exit code`, and reprioritized recent important events away from non-critical WER noise.
+- Tightened Spanish `Application Error 1000` parsing, added an internal warning when process extraction fails, and reduced WER noise in `Recent Important Events`.
