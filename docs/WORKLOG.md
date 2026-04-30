@@ -29,3 +29,5 @@
 - Bumped script version to `0.3.7` after correcting the last pending kernel-uptime and boot-state semantics work.
 - Added `-SelfTestEventParser` to validate `Get-WTEventProcessName` against Spanish Application Error and WER crash samples before running the full triage.
 - Bumped script version to `0.3.8` after hardening the Spanish `Application Error 1000` parser path and adding parser self-tests.
+- Added a read-only Windows Update, CBS, servicing, Store and Edge/WebView diagnostics module with pending reboot checks, hotfix inventory, servicing WER classification and update-focused report sections.
+- Bumped script version to `0.4.0` after integrating the Windows Update / servicing diagnostics module.
