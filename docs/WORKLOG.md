@@ -16,3 +16,4 @@
 - Tightened report naming to use millisecond timestamps plus incremental suffixes, added `RunId`, and corrected build rendering in console and Markdown output.
 - Updated report naming consistency and metadata/output formatting so repeated runs do not collide and build text is always populated or marked unknown.
 - Added first real System/Application event module with CSV export, event overview Markdown, and initial shutdown/bugcheck/service/app-crash findings plus basic correlations.
+- Refined event classification to reduce WER false positives, added process extraction and crash summaries, and made Markdown counts more robust.
