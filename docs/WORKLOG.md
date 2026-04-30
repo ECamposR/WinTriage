@@ -35,3 +35,7 @@
 - Added explicit `PendingRebootSource`, `GenericRestartSignal`, and pending file rename sampling fields to keep update metadata clean and more actionable.
 - Suppressed accidental pipeline output from the Updates collector and top-level framework findings so `Raw.Updates` and `Normalized.Updates` remain clean objects.
 - Bumped script version to `0.4.1` after fixing pending reboot false positives and report-object contamination.
+- Added explicit `Execution.Errors` and `Execution.Warnings` rendering in Markdown and console so technical issues are visible without opening JSON.
+- Introduced technical-error classification so `ExitCode=2` is reserved for integrity-affecting partial/fatal errors instead of every captured exception.
+- Hardened the Windows Update and Event collectors so "no matching events" results are treated as normal absence of data, not execution errors.
+- Bumped script version to `0.4.2` after refining execution reporting and exit-code policy.

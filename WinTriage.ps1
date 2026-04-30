@@ -16,7 +16,7 @@ param(
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.4.1'
+$script:WTVersion = '0.4.2'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -267,6 +267,54 @@ function Add-WTExecutionWarning {
     return $Report
 }
 
+function Get-WTExecutionErrorClassification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Scope,
+
+        [AllowNull()]
+        [string]$Message
+    )
+
+    $nonFatalScopes = @(
+        'OutputPath',
+        'MarkdownExport',
+        'JsonExport',
+        'OpenReport',
+        'EventProcessParsing',
+        'AdminExample',
+        'EventCsv',
+        'UpdateCsv'
+    )
+
+    if ($Scope -in $nonFatalScopes) {
+        return [pscustomobject]@{
+            Impact                  = 'NonFatal'
+            AffectsReportIntegrity  = $false
+        }
+    }
+
+    if ($Scope -match '^(SystemInfo|PowerBootInfo|DiskInfo|PerformanceInfo|UpdateInfo|EventInfo|SystemRules|PowerBootRules|DiskRules|PerformanceRules|UpdateRules|EventRules|EventCorrelationRules)$') {
+        return [pscustomobject]@{
+            Impact                  = 'Partial'
+            AffectsReportIntegrity  = $true
+        }
+    }
+
+    if ($Scope -match '^(Fatal)$') {
+        return [pscustomobject]@{
+            Impact                  = 'Fatal'
+            AffectsReportIntegrity  = $true
+        }
+    }
+
+    return [pscustomobject]@{
+        Impact                  = 'Partial'
+        AffectsReportIntegrity  = $true
+    }
+}
+
 function Add-WTFinding {
     [CmdletBinding()]
     param(
@@ -362,13 +410,20 @@ function Add-WTExecutionError {
         [string]$Scope,
 
         [Parameter(Mandatory = $true)]
-        [string]$Message
+        [string]$Message,
+
+        [ValidateSet('NonFatal', 'Partial', 'Fatal')]
+        [string]$Impact = 'Partial',
+
+        [bool]$AffectsReportIntegrity = $true
     )
 
     $entry = [ordered]@{
         Scope     = $Scope
         Message   = $Message
         Timestamp = (Get-Date).ToString('o')
+        Impact    = $Impact
+        AffectsReportIntegrity = $AffectsReportIntegrity
     }
 
     $Report.Execution.Errors += [pscustomobject]$entry
@@ -416,7 +471,7 @@ function Invoke-WTSafeCollector {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
     if ($RequiresAdmin -and -not $Report.Metadata.IsAdmin) {
-        Add-WTSkippedCheck -Report $Report -Check $Name -Reason 'Requires administrator privileges.'
+        [void](Add-WTSkippedCheck -Report $Report -Check $Name -Reason 'Requires administrator privileges.')
         $sw.Stop()
         $Report.Execution.Timings += [pscustomobject]@{
             Name      = $Name
@@ -440,7 +495,8 @@ function Invoke-WTSafeCollector {
     }
     catch {
         $sw.Stop()
-        Add-WTExecutionError -Report $Report -Scope $Name -Message $_.Exception.Message
+        $classification = Get-WTExecutionErrorClassification -Scope $Name -Message $_.Exception.Message
+        [void](Add-WTExecutionError -Report $Report -Scope $Name -Message $_.Exception.Message -Impact $classification.Impact -AffectsReportIntegrity $classification.AffectsReportIntegrity)
         $Report.Execution.Timings += [pscustomobject]@{
             Name      = $Name
             Status    = 'Error'
@@ -479,7 +535,8 @@ function Invoke-WTSafeStep {
     catch {
         $sw.Stop()
         if ($Report) {
-            Add-WTExecutionError -Report $Report -Scope $Name -Message $_.Exception.Message
+            $classification = Get-WTExecutionErrorClassification -Scope $Name -Message $_.Exception.Message
+            [void](Add-WTExecutionError -Report $Report -Scope $Name -Message $_.Exception.Message -Impact $classification.Impact -AffectsReportIntegrity $classification.AffectsReportIntegrity)
             $Report.Execution.Timings += [pscustomobject]@{
                 Name       = $Name
                 Status     = 'Error'
@@ -692,24 +749,91 @@ function Write-WTConsoleSummary {
         foreach ($line in $lines) {
             Write-Host $line
         }
+    }
+    else {
+        Write-Host $lines[0] -ForegroundColor Cyan
+        Write-Host $lines[1] -ForegroundColor Gray
+        Write-Host $lines[2] -ForegroundColor White
+        Write-Host $lines[3] -ForegroundColor DarkGray
+        Write-Host $lines[4] -ForegroundColor Gray
+        Write-Host $lines[5] -ForegroundColor Gray
+        Write-Host $lines[6] -ForegroundColor Gray
+        Write-Host $lines[7] -ForegroundColor Gray
+        Write-Host $lines[8] -ForegroundColor Gray
+        Write-Host $lines[9] -ForegroundColor Gray
+        Write-Host $lines[10] -ForegroundColor Gray
+        Write-Host $lines[11] -ForegroundColor DarkGray
+        Write-Host $lines[12] -ForegroundColor Gray
+        Write-Host $lines[13] -ForegroundColor Gray
+        Write-Host $lines[14] -ForegroundColor DarkGray
+    }
+
+    $errorRows = @($Report.Execution.Errors)
+    $warningRows = @($Report.Execution.Warnings)
+
+    if ($errorRows.Count -gt 0) {
+        if ($NoColor) {
+            Write-Host 'Execution errors:'
+        }
+        else {
+            Write-Host 'Execution errors:' -ForegroundColor Red
+        }
+        $errorDisplayRows = @($errorRows | Select-Object -First 3)
+        foreach ($err in $errorDisplayRows) {
+            $line = '- {0}: {1}' -f (ConvertTo-WTDisplayValue -Value $err.Scope -Fallback 'Unknown'), (ConvertTo-WTDisplayValue -Value $err.Message -Fallback 'Unknown')
+            if ($NoColor) {
+                Write-Host $line
+            }
+            else {
+                Write-Host $line -ForegroundColor DarkRed
+            }
+        }
+        if ($errorRows.Count -gt 3) {
+            $moreCount = $errorRows.Count - 3
+            $moreLine = '... and {0} more' -f $moreCount
+            if ($NoColor) {
+                Write-Host $moreLine
+            }
+            else {
+                Write-Host $moreLine -ForegroundColor DarkRed
+            }
+        }
+    }
+
+    if ($warningRows.Count -gt 0) {
+        if ($NoColor) {
+            Write-Host 'Execution warnings:'
+        }
+        else {
+            Write-Host 'Execution warnings:' -ForegroundColor Yellow
+        }
+        $warningDisplayRows = @($warningRows | Select-Object -First 3)
+        foreach ($warn in $warningDisplayRows) {
+            $line = '- {0}: {1}' -f (ConvertTo-WTDisplayValue -Value $warn.Scope -Fallback 'Unknown'), (ConvertTo-WTDisplayValue -Value $warn.Message -Fallback 'Unknown')
+            if ($NoColor) {
+                Write-Host $line
+            }
+            else {
+                Write-Host $line -ForegroundColor DarkYellow
+            }
+        }
+        if ($warningRows.Count -gt 3) {
+            $moreCount = $warningRows.Count - 3
+            $moreLine = '... and {0} more' -f $moreCount
+            if ($NoColor) {
+                Write-Host $moreLine
+            }
+            else {
+                Write-Host $moreLine -ForegroundColor DarkYellow
+            }
+        }
+    }
+
+    if ($NoColor) {
+        Write-Host $lines[15]
         return
     }
 
-    Write-Host $lines[0] -ForegroundColor Cyan
-    Write-Host $lines[1] -ForegroundColor Gray
-    Write-Host $lines[2] -ForegroundColor White
-    Write-Host $lines[3] -ForegroundColor DarkGray
-    Write-Host $lines[4] -ForegroundColor Gray
-    Write-Host $lines[5] -ForegroundColor Gray
-    Write-Host $lines[6] -ForegroundColor Gray
-    Write-Host $lines[7] -ForegroundColor Gray
-    Write-Host $lines[8] -ForegroundColor Gray
-    Write-Host $lines[9] -ForegroundColor Gray
-    Write-Host $lines[10] -ForegroundColor Gray
-    Write-Host $lines[11] -ForegroundColor DarkGray
-    Write-Host $lines[12] -ForegroundColor Gray
-    Write-Host $lines[13] -ForegroundColor Gray
-    Write-Host $lines[14] -ForegroundColor DarkGray
     Write-Host $lines[15] -ForegroundColor Green
 }
 
@@ -1069,6 +1193,53 @@ function Export-WTMarkdownReport {
     [void]$sb.AppendLine(('* Errors: {0}' -f @($Report.Execution.Errors).Count))
     [void]$sb.AppendLine(('* Warnings: {0}' -f @($Report.Execution.Warnings).Count))
     [void]$sb.AppendLine(('* Skipped checks: {0}' -f @($Report.Execution.Skipped).Count))
+    [void]$sb.AppendLine('')
+
+    $executionErrors = @($Report.Execution.Errors)
+    if ($executionErrors.Count -eq 0) {
+        [void]$sb.AppendLine('### Execution Errors')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('No execution errors recorded.')
+        [void]$sb.AppendLine('')
+    }
+    else {
+        [void]$sb.AppendLine('### Execution Errors')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| Scope | Message | Impact | AffectsReportIntegrity | Timestamp |')
+        [void]$sb.AppendLine('| --- | --- | --- | --- | --- |')
+        foreach ($err in @($executionErrors | Select-Object -First 20)) {
+            [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} |' -f (
+                (ConvertTo-WTDisplayValue -Value $err.Scope -Fallback 'Unknown') -replace '\|', '\|',
+                (ConvertTo-WTDisplayValue -Value $err.Message -Fallback 'Unknown') -replace '\|', '\|',
+                (ConvertTo-WTDisplayValue -Value $err.Impact -Fallback 'Unknown') -replace '\|', '\|',
+                (ConvertTo-WTYesNo -Value ([bool]$err.AffectsReportIntegrity)),
+                (ConvertTo-WTDisplayValue -Value $err.Timestamp -Fallback 'Unknown') -replace '\|', '\|'
+            )))
+        }
+        [void]$sb.AppendLine('')
+    }
+
+    $executionWarnings = @($Report.Execution.Warnings)
+    if ($executionWarnings.Count -eq 0) {
+        [void]$sb.AppendLine('### Execution Warnings')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('No execution warnings recorded.')
+        [void]$sb.AppendLine('')
+    }
+    else {
+        [void]$sb.AppendLine('### Execution Warnings')
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('| Scope | Message | Timestamp |')
+        [void]$sb.AppendLine('| --- | --- | --- |')
+        foreach ($warn in @($executionWarnings | Select-Object -First 20)) {
+            [void]$sb.AppendLine(('| {0} | {1} | {2} |' -f (
+                (ConvertTo-WTDisplayValue -Value $warn.Scope -Fallback 'Unknown') -replace '\|', '\|',
+                (ConvertTo-WTDisplayValue -Value $warn.Message -Fallback 'Unknown') -replace '\|', '\|',
+                (ConvertTo-WTDisplayValue -Value $warn.Timestamp -Fallback 'Unknown') -replace '\|', '\|'
+            )))
+        }
+        [void]$sb.AppendLine('')
+    }
 
     [System.IO.File]::WriteAllText($Path, $sb.ToString(), [System.Text.Encoding]::UTF8)
     return $Path
@@ -2377,8 +2548,12 @@ function Get-WTUpdateInfo {
             $wuRawEvents += @(Get-WinEvent -FilterHashtable $query -MaxEvents ($updateLimit + 1) -ErrorAction Stop)
         }
         catch {
+            $reason = $_.Exception.Message
+            if ($reason -match '(?i)(no matching events|no se encontraron eventos|no events were found|no events match|no hay eventos)') {
+                continue
+            }
             $wuQueryFailures++
-            [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection failed for {0}: {1}' -f $wuLogName, $_.Exception.Message))
+            [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection failed for {0}: {1}' -f $wuLogName, $reason))
         }
     }
 
@@ -2412,11 +2587,16 @@ function Get-WTUpdateInfo {
     }
     catch {
         $reason = $_.Exception.Message
-        $logsUnavailable += [pscustomobject]@{
-            LogName = $setupLogName
-            Reason  = $reason
+        if ($reason -match '(?i)(no matching events|no se encontraron eventos|no events were found|no events match|no hay eventos)') {
+            $setupRawEvents = @()
         }
-        [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection failed for {0}: {1}' -f $setupLogName, $reason))
+        else {
+            $logsUnavailable += [pscustomobject]@{
+                LogName = $setupLogName
+                Reason  = $reason
+            }
+            [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Event collection failed for {0}: {1}' -f $setupLogName, $reason))
+        }
         $setupRawEvents = @()
     }
 
@@ -2723,7 +2903,7 @@ function Export-WTUpdateCsv {
         [void][System.IO.Directory]::CreateDirectory($rawDirectory)
     }
     catch {
-        Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Unable to create raw update output directory: {0}' -f $_.Exception.Message)
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Unable to create raw update output directory: {0}' -f $_.Exception.Message))
         return $null
     }
 
@@ -2760,7 +2940,7 @@ function Export-WTUpdateCsv {
         [System.IO.File]::WriteAllLines($path, $lines.ToArray(), [System.Text.Encoding]::UTF8)
     }
     catch {
-        Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Unable to write Windows Update CSV export: {0}' -f $_.Exception.Message)
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Updates' -Message ('Unable to write Windows Update CSV export: {0}' -f $_.Exception.Message))
     }
 
     return [pscustomobject]@{
@@ -3697,16 +3877,18 @@ function Get-WTEventInfo {
         }
         catch {
             $reason = $_.Exception.Message
-            $logsUnavailable += [pscustomobject]@{
-                LogName = $logDefinition.LogName
-                Reason  = $reason
+            if ($reason -notmatch '(?i)(no matching events|no se encontraron eventos|no events were found|no events match|no hay eventos)') {
+                $logsUnavailable += [pscustomobject]@{
+                    LogName = $logDefinition.LogName
+                    Reason  = $reason
+                }
+                [void](Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Event collection failed for {0}: {1}' -f $logDefinition.LogName, $reason))
             }
-            Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Event collection failed for {0}: {1}' -f $logDefinition.LogName, $reason)
             continue
         }
 
         if ($rawEvents.Count -gt $limit) {
-            Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Event collection limit reached for {0}. Results may be incomplete.' -f $logDefinition.LogName)
+            [void](Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Event collection limit reached for {0}. Results may be incomplete.' -f $logDefinition.LogName))
             $rawEvents = @($rawEvents | Select-Object -First $limit)
         }
 
@@ -3989,7 +4171,7 @@ function Export-WTEventCsv {
         [void][System.IO.Directory]::CreateDirectory($rawDirectory)
     }
     catch {
-        Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Unable to create raw event output directory: {0}' -f $_.Exception.Message)
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Unable to create raw event output directory: {0}' -f $_.Exception.Message))
         return $null
     }
 
@@ -4046,7 +4228,7 @@ function Export-WTEventCsv {
         & $writeCsv -Path $Report.Metadata.EventCsvAllPath -Rows $allRows
     }
     catch {
-        Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Unable to write event CSV exports: {0}' -f $_.Exception.Message)
+        [void](Add-WTExecutionWarning -Report $Report -Scope 'Events' -Message ('Unable to write event CSV exports: {0}' -f $_.Exception.Message))
     }
 
     return [pscustomobject]@{
@@ -4436,10 +4618,16 @@ function Invoke-WinTriage {
             Update-WTSummary -Report $report | Out-Null
         } | Out-Null
 
+        $technicalErrors = @(
+            $report.Execution.Errors | Where-Object {
+                $_.Impact -in @('Partial', 'Fatal') -and $_.AffectsReportIntegrity -eq $true
+            }
+        )
+
         if ($report.Summary.Critical -gt 0 -or $report.Summary.High -gt 0) {
             $exitCode = 1
         }
-        elseif (@($report.Execution.Errors).Count -gt 0) {
+        elseif ($technicalErrors.Count -gt 0) {
             $exitCode = 2
         }
         else {
@@ -4477,7 +4665,7 @@ function Invoke-WinTriage {
     }
     catch {
         if ($report) {
-            Add-WTExecutionError -Report $report -Scope 'Fatal' -Message $_.Exception.Message
+            [void](Add-WTExecutionError -Report $report -Scope 'Fatal' -Message $_.Exception.Message -Impact 'Fatal' -AffectsReportIntegrity $true)
             if (-not $report.Metadata.FinishedAt) {
                 $report.Metadata.FinishedAt = (Get-Date).ToString('o')
             }
