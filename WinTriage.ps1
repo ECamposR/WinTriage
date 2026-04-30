@@ -10,13 +10,14 @@ param(
     [switch]$UseExitCode,
     [switch]$OpenReport,
     [switch]$DebugErrors,
-    [switch]$SelfTestEventParser
+    [switch]$SelfTestEventParser,
+    [switch]$SelfTestMarkdown
 )
 
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.4.2'
+$script:WTVersion = '0.4.3'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -627,6 +628,36 @@ function Update-WTSummary {
     return $Report
 }
 
+function Test-WTRequiredFunctions {
+    [CmdletBinding()]
+    param()
+
+    $requiredFunctions = @(
+        'ConvertTo-WTDisplayValue'
+        'ConvertTo-WTYesNoUnknown'
+        'ConvertTo-WTEnabledDisabledUnknown'
+        'ConvertTo-WTDateTimeString'
+        'Get-WTArrayCountSafe'
+        'Add-WTFinding'
+        'Add-WTExecutionError'
+        'Add-WTExecutionWarning'
+        'ConvertTo-WTMarkdownCell'
+    )
+
+    $missing = @()
+    foreach ($functionName in $requiredFunctions) {
+        if (-not (Get-Command -Name $functionName -CommandType Function -ErrorAction SilentlyContinue)) {
+            $missing += $functionName
+        }
+    }
+
+    return [pscustomobject]@{
+        Passed         = ($missing.Count -eq 0)
+        Missing        = $missing
+        MissingMessage = if ($missing.Count -eq 0) { $null } else { 'Missing required function(s): {0}' -f ($missing -join ', ') }
+    }
+}
+
 function Write-WTConsoleSummary {
     [CmdletBinding()]
     param(
@@ -991,7 +1022,7 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($svc in $serviceRows) {
-                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTDisplayValue -Value $svc.Name), (ConvertTo-WTDisplayValue -Value $svc.DisplayName), (ConvertTo-WTDisplayValue -Value $svc.Status), (ConvertTo-WTDisplayValue -Value $svc.StartType)))
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f (ConvertTo-WTMarkdownCell -Value $svc.Name), (ConvertTo-WTMarkdownCell -Value $svc.DisplayName), (ConvertTo-WTMarkdownCell -Value $svc.Status), (ConvertTo-WTMarkdownCell -Value $svc.StartType)))
             }
         }
         [void]$sb.AppendLine('')
@@ -1005,10 +1036,10 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($evt in $wuRecentRows) {
-                $timeText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'
-                $levelText = (ConvertTo-WTDisplayValue -Value $evt.LevelDisplayName) -replace '\|', '\|'
-                $messageText = (ConvertTo-WTDisplayValue -Value $evt.MessageShort) -replace '\|', '\|'
-                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f $timeText, (ConvertTo-WTDisplayValue -Value $evt.Id), $levelText, $messageText))
+                $timeText = ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'
+                $levelText = ConvertTo-WTMarkdownCell -Value $evt.LevelDisplayName
+                $messageText = ConvertTo-WTMarkdownCell -Value $evt.MessageShort
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f $timeText, (ConvertTo-WTMarkdownCell -Value $evt.Id), $levelText, $messageText))
             }
         }
         [void]$sb.AppendLine('')
@@ -1022,10 +1053,10 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($evt in $indicatorRows) {
-                $timeText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'
-                $typeText = ConvertTo-WTDisplayValue -Value $evt.Type
-                $nameText = ConvertTo-WTDisplayValue -Value $evt.WerEventName
-                $messageText = (ConvertTo-WTDisplayValue -Value $evt.MessageShort) -replace '\|', '\|'
+                $timeText = ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'
+                $typeText = ConvertTo-WTMarkdownCell -Value $evt.Type
+                $nameText = ConvertTo-WTMarkdownCell -Value $evt.WerEventName
+                $messageText = ConvertTo-WTMarkdownCell -Value $evt.MessageShort
                 [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f $timeText, $typeText, $nameText, $messageText))
             }
         }
@@ -1045,7 +1076,7 @@ function Export-WTMarkdownReport {
     }
     else {
         foreach ($disk in $diskRows) {
-            [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} | {6} |' -f (ConvertTo-WTDisplayValue -Value $disk.DriveLetter), (ConvertTo-WTDisplayValue -Value $disk.FileSystem), (ConvertTo-WTDisplayValue -Value $disk.SizeGB), (ConvertTo-WTDisplayValue -Value $disk.FreeGB), (ConvertTo-WTDisplayValue -Value $disk.FreePercent), (ConvertTo-WTDisplayValue -Value $disk.Status), (ConvertTo-WTYesNo -Value ([bool]$disk.IsSystemDrive))))
+            [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} | {6} |' -f (ConvertTo-WTMarkdownCell -Value $disk.DriveLetter), (ConvertTo-WTMarkdownCell -Value $disk.FileSystem), (ConvertTo-WTMarkdownCell -Value $disk.SizeGB), (ConvertTo-WTMarkdownCell -Value $disk.FreeGB), (ConvertTo-WTMarkdownCell -Value $disk.FreePercent), (ConvertTo-WTMarkdownCell -Value $disk.Status), (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTYesNo -Value ([bool]$disk.IsSystemDrive)))))
         }
     }
     [void]$sb.AppendLine('')
@@ -1124,12 +1155,12 @@ function Export-WTMarkdownReport {
         }
         else {
             foreach ($evt in $recentEvents) {
-                $timeText = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'
-                $logText = (ConvertTo-WTDisplayValue -Value $evt.LogName) -replace '\|', '\|'
-                $providerText = (ConvertTo-WTDisplayValue -Value $evt.ProviderName) -replace '\|', '\|'
-                $levelText = (ConvertTo-WTDisplayValue -Value $evt.LevelDisplayName) -replace '\|', '\|'
-                $messageText = (ConvertTo-WTDisplayValue -Value $evt.MessageShort) -replace '\|', '\|'
-                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} |' -f $timeText, $logText, $providerText, (ConvertTo-WTDisplayValue -Value $evt.Id), $levelText, $messageText))
+                $timeText = ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $evt.TimeCreated) -Fallback 'Unknown'
+                $logText = ConvertTo-WTMarkdownCell -Value $evt.LogName
+                $providerText = ConvertTo-WTMarkdownCell -Value $evt.ProviderName
+                $levelText = ConvertTo-WTMarkdownCell -Value $evt.LevelDisplayName
+                $messageText = ConvertTo-WTMarkdownCell -Value $evt.MessageShort
+                [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} | {5} |' -f $timeText, $logText, $providerText, (ConvertTo-WTMarkdownCell -Value $evt.Id), $levelText, $messageText))
             }
         }
     }
@@ -1147,10 +1178,10 @@ function Export-WTMarkdownReport {
         [void]$sb.AppendLine('| Process | Count | LastEvent | Example |')
         [void]$sb.AppendLine('| --- | ---: | --- | --- |')
         foreach ($row in @($crashSummaryRows | Select-Object -First 10)) {
-            $rowProcess = ConvertTo-WTDisplayValue -Value $row.ProcessName
+            $rowProcess = ConvertTo-WTMarkdownCell -Value $row.ProcessName
             $rowCount = if ($null -ne $row.Count) { $row.Count } else { 0 }
-            $rowLast = ConvertTo-WTDisplayValue -Value (ConvertTo-WTDateTimeString -Value $row.LastEvent) -Fallback 'Unknown'
-            $rowExample = ConvertTo-WTDisplayValue -Value $row.ExampleMessageShort -Fallback 'Unknown'
+            $rowLast = ConvertTo-WTMarkdownCell -Value (ConvertTo-WTDateTimeString -Value $row.LastEvent) -Fallback 'Unknown'
+            $rowExample = ConvertTo-WTMarkdownCell -Value $row.ExampleMessageShort -Fallback 'Unknown'
             [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} |' -f $rowProcess, $rowCount, $rowLast, $rowExample))
         }
     }
@@ -1209,11 +1240,11 @@ function Export-WTMarkdownReport {
         [void]$sb.AppendLine('| --- | --- | --- | --- | --- |')
         foreach ($err in @($executionErrors | Select-Object -First 20)) {
             [void]$sb.AppendLine(('| {0} | {1} | {2} | {3} | {4} |' -f (
-                (ConvertTo-WTDisplayValue -Value $err.Scope -Fallback 'Unknown') -replace '\|', '\|',
-                (ConvertTo-WTDisplayValue -Value $err.Message -Fallback 'Unknown') -replace '\|', '\|',
-                (ConvertTo-WTDisplayValue -Value $err.Impact -Fallback 'Unknown') -replace '\|', '\|',
-                (ConvertTo-WTYesNo -Value ([bool]$err.AffectsReportIntegrity)),
-                (ConvertTo-WTDisplayValue -Value $err.Timestamp -Fallback 'Unknown') -replace '\|', '\|'
+                (ConvertTo-WTMarkdownCell -Value $err.Scope -Fallback 'Unknown'),
+                (ConvertTo-WTMarkdownCell -Value $err.Message -Fallback 'Unknown'),
+                (ConvertTo-WTMarkdownCell -Value $err.Impact -Fallback 'Unknown'),
+                (ConvertTo-WTMarkdownCell -Value (ConvertTo-WTYesNo -Value ([bool]$err.AffectsReportIntegrity))),
+                (ConvertTo-WTMarkdownCell -Value $err.Timestamp -Fallback 'Unknown')
             )))
         }
         [void]$sb.AppendLine('')
@@ -1233,9 +1264,9 @@ function Export-WTMarkdownReport {
         [void]$sb.AppendLine('| --- | --- | --- |')
         foreach ($warn in @($executionWarnings | Select-Object -First 20)) {
             [void]$sb.AppendLine(('| {0} | {1} | {2} |' -f (
-                (ConvertTo-WTDisplayValue -Value $warn.Scope -Fallback 'Unknown') -replace '\|', '\|',
-                (ConvertTo-WTDisplayValue -Value $warn.Message -Fallback 'Unknown') -replace '\|', '\|',
-                (ConvertTo-WTDisplayValue -Value $warn.Timestamp -Fallback 'Unknown') -replace '\|', '\|'
+                (ConvertTo-WTMarkdownCell -Value $warn.Scope -Fallback 'Unknown'),
+                (ConvertTo-WTMarkdownCell -Value $warn.Message -Fallback 'Unknown'),
+                (ConvertTo-WTMarkdownCell -Value $warn.Timestamp -Fallback 'Unknown')
             )))
         }
         [void]$sb.AppendLine('')
@@ -1265,6 +1296,75 @@ function ConvertTo-WTDisplayValue {
     }
 
     return $Value
+}
+
+function ConvertTo-WTMarkdownCell {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Value,
+
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Fallback = 'Unknown'
+    )
+
+    if ($null -eq $Value) {
+        return $Fallback
+    }
+
+    if ($Value -is [string]) {
+        $text = $Value
+    }
+    elseif ($Value -is [datetime]) {
+        $text = ConvertTo-WTDateTimeString -Value $Value
+    }
+    elseif ($Value -is [bool]) {
+        $text = ConvertTo-WTYesNoUnknown -Value $Value
+    }
+    elseif ($Value -is [System.Array] -or ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string]))) {
+        $parts = @()
+        foreach ($item in @($Value)) {
+            if ($null -eq $item) {
+                continue
+            }
+            $itemText = ConvertTo-WTMarkdownCell -Value $item -Fallback ''
+            if (-not [string]::IsNullOrWhiteSpace($itemText)) {
+                $parts += $itemText
+            }
+        }
+
+        if ($parts.Count -eq 0) {
+            return $Fallback
+        }
+
+        $text = $parts -join '; '
+    }
+    elseif ($Value -is [System.Collections.IDictionary] -or $Value.GetType().FullName -like 'System.Management.Automation.PSCustomObject*') {
+        try {
+            $text = $Value | ConvertTo-Json -Compress -Depth 4 -ErrorAction Stop
+        }
+        catch {
+            $text = [string]$Value
+        }
+    }
+    else {
+        try {
+            $text = [string]$Value
+        }
+        catch {
+            $text = $null
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $Fallback
+    }
+
+    $text = [regex]::Replace($text, '(\r\n|\n|\r)', ' ')
+    $text = [regex]::Replace($text, '\s+', ' ').Trim()
+    $text = [regex]::Replace($text, '\|', '\|')
+    return $text
 }
 
 function ConvertTo-WTYesNoUnknown {
@@ -2994,7 +3094,7 @@ function Invoke-WTUpdateRules {
         }
         [void](Add-WTFinding -Report $Report -Id 'WT-UPD-PENDING-FILE-RENAME' -Category 'Updates' -Severity 'Info' -Title 'Pending file rename operations detected' -Description 'Windows has pending file rename operations registered. This may be caused by installers, drivers, antivirus, agents or third-party software and does not necessarily mean Windows Update requires a reboot.' -Evidence @(
             ('PendingFileRenameOperations={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.PendingFileRenameOperations)),
-            ('PendingFileRenameOperationsCount={0}' -f (Get-WTDisplayValue -Value $pending.PendingFileRenameOperationsCount -Fallback 'Unknown')),
+            ('PendingFileRenameOperationsCount={0}' -f (ConvertTo-WTDisplayValue -Value $pending.PendingFileRenameOperationsCount -Fallback 'Unknown')),
             ('Sample={0}' -f $sampleText),
             'UpdatePendingReboot=False',
             ('CbsRebootPending={0}' -f (ConvertTo-WTYesNoUnknown -Value $pending.CbsRebootPending)),
@@ -3792,6 +3892,111 @@ P2: Windows.Desktop
     }
 }
 
+function Invoke-WTMarkdownSelfTest {
+    [CmdletBinding()]
+    param()
+
+    $tests = @(
+        [pscustomobject]@{
+            Name = 'Null value'
+            Input = $null
+            Expected = 'Unknown'
+        },
+        [pscustomobject]@{
+            Name = 'Pipe escaping'
+            Input = 'texto|con|pipes'
+            Expected = 'texto\|con\|pipes'
+        },
+        [pscustomobject]@{
+            Name = 'Multiline collapsing'
+            Input = "línea1`r`nlínea2"
+            Expected = 'línea1 línea2'
+        },
+        [pscustomobject]@{
+            Name = 'Array joining'
+            Input = @('uno', 'dos', 'tres')
+            Expected = 'uno; dos; tres'
+        },
+        [pscustomobject]@{
+            Name = 'Object serialization'
+            Input = [pscustomobject]@{
+                A = 1
+                B = 'x'
+            }
+            Expected = '{"A":1,"B":"x"}'
+        }
+    )
+
+    $results = @()
+    $failed = $false
+    $tempRoot = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+    $tempDir = Join-Path -Path $tempRoot -ChildPath 'WinTriage'
+    $tempPath = Join-Path -Path $tempDir -ChildPath 'selftest-markdown.md'
+
+    try {
+        [void][System.IO.Directory]::CreateDirectory($tempDir)
+    }
+    catch {
+    }
+
+    foreach ($test in $tests) {
+        $actual = ConvertTo-WTMarkdownCell -Value $test.Input -Fallback 'Unknown'
+        $pass = $actual -eq $test.Expected
+        if ($pass) {
+            Write-Host ('PASS: {0}' -f $test.Name) -ForegroundColor Green
+        }
+        else {
+            $failed = $true
+            Write-Host ('FAIL: {0}' -f $test.Name) -ForegroundColor Red
+            Write-Host ('  Expected={0}' -f (ConvertTo-WTDisplayValue -Value $test.Expected)) -ForegroundColor Red
+            Write-Host ('  Actual  ={0}' -f (ConvertTo-WTDisplayValue -Value $actual)) -ForegroundColor Red
+        }
+
+        $results += [pscustomobject]@{
+            Name     = $test.Name
+            Passed   = $pass
+            Expected = $test.Expected
+            Actual   = $actual
+        }
+    }
+
+    try {
+        $content = New-Object System.Collections.Generic.List[string]
+        $content.Add('# WinTriage Markdown Self-Test') | Out-Null
+        $content.Add('') | Out-Null
+        foreach ($result in $results) {
+            $content.Add(('* {0}: {1}' -f $result.Name, (ConvertTo-WTMarkdownCell -Value $result.Actual -Fallback 'Unknown'))) | Out-Null
+        }
+        [System.IO.File]::WriteAllLines($tempPath, $content.ToArray(), [System.Text.Encoding]::UTF8)
+    }
+    catch {
+        $failed = $true
+        Write-Host ('FAIL: unable to write Markdown self-test file. {0}' -f $_.Exception.Message) -ForegroundColor Red
+    }
+
+    if ($failed) {
+        Write-Host 'FAIL' -ForegroundColor Red
+        return [pscustomobject]@{
+            Passed = $false
+            Results = $results
+            Path = $tempPath
+        }
+    }
+
+    Write-Host 'PASS' -ForegroundColor Green
+    Write-Host 'Self-test summary:' -ForegroundColor Green
+    foreach ($result in $results) {
+        Write-Host ('- {0}: PASS' -f $result.Name) -ForegroundColor Green
+    }
+    Write-Host ('Markdown test file: {0}' -f $tempPath) -ForegroundColor Green
+
+    return [pscustomobject]@{
+        Passed = $true
+        Results = $results
+        Path = $tempPath
+    }
+}
+
 function ConvertTo-WTEventRecord {
     [CmdletBinding()]
     param(
@@ -4420,6 +4625,18 @@ function Invoke-WinTriage {
             [void](Add-WTExecutionWarning -Report $report -Scope 'OutputPath' -Message ('Fallback output path used because the requested path could not be created. Requested: {0}. Fallback: {1}. Reason: {2}' -f $resolvedOutput.RequestedPath, $resolvedOutput.FallbackPath, $resolvedOutput.FallbackReason))
         }
 
+        $requiredFunctions = Test-WTRequiredFunctions
+        if (-not $requiredFunctions.Passed) {
+            [void](Add-WTExecutionError -Report $report -Scope 'FunctionValidation' -Message $requiredFunctions.MissingMessage -Impact 'Fatal' -AffectsReportIntegrity $true)
+            Write-Host ('WinTriage failed during initialization. {0}' -f $requiredFunctions.MissingMessage) -ForegroundColor Red
+            if ($script:WTDebugErrors -and $requiredFunctions.Missing.Count -gt 0) {
+                Write-Host ('Missing required function(s): {0}' -f ($requiredFunctions.Missing -join ', ')) -ForegroundColor Red
+            }
+            $report.Metadata.ExitCode = 3
+            $report.Metadata.FinishedAt = (Get-Date).ToString('o')
+            return 3
+        }
+
         $systemRaw = Invoke-WTSafeCollector -Report $report -Name 'SystemInfo' -ScriptBlock {
             Get-WTSystemInfo
         }
@@ -4727,7 +4944,16 @@ function Invoke-WinTriage {
     }
 }
 
-if ($SelfTestEventParser.IsPresent) {
+if ($SelfTestMarkdown.IsPresent) {
+    $selfTestResult = Invoke-WTMarkdownSelfTest
+    if ($UseExitCode.IsPresent) {
+        if ($selfTestResult.Passed) {
+            exit 0
+        }
+        exit 1
+    }
+}
+elseif ($SelfTestEventParser.IsPresent) {
     $selfTestResult = Invoke-WTEventParserSelfTest
     if ($UseExitCode.IsPresent) {
         if ($selfTestResult.Passed) {

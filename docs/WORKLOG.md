@@ -39,3 +39,5 @@
 - Introduced technical-error classification so `ExitCode=2` is reserved for integrity-affecting partial/fatal errors instead of every captured exception.
 - Hardened the Windows Update and Event collectors so "no matching events" results are treated as normal absence of data, not execution errors.
 - Bumped script version to `0.4.2` after refining execution reporting and exit-code policy.
+- Fixed a broken `Get-WTDisplayValue` call in Windows Update rules, hardened Markdown cell rendering with a reusable helper, and added a Markdown self-test plus required-function validation.
+- Bumped script version to `0.4.3` after hotfixing the runtime Markdown and function-resolution regressions.
