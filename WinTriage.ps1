@@ -9,13 +9,14 @@ param(
     [switch]$NoColor,
     [switch]$UseExitCode,
     [switch]$OpenReport,
-    [switch]$DebugErrors
+    [switch]$DebugErrors,
+    [switch]$SelfTestEventParser
 )
 
 # WinTriage is read-only by design.
 # It collects diagnostic data and generates reports without modifying system configuration.
 
-$script:WTVersion = '0.3.7'
+$script:WTVersion = '0.3.8'
 $script:WTIsJsonOnly = $JsonOnly.IsPresent
 $script:WTNoColor = $NoColor.IsPresent
 $script:WTDebugErrors = $DebugErrors.IsPresent
@@ -2206,67 +2207,75 @@ function Get-WTApplicationErrorProcessInfo {
     $processPath = $null
     $sourcePattern = $null
 
-    $nameRules = @(
-        [pscustomobject]@{
-            Pattern = '^\s*Nombre de aplicación con errores:\s*(?<name>[^,\r\n]+)'
-            Source  = 'SpanishFaultingApplicationName'
-        },
-        [pscustomobject]@{
-            Pattern = '^\s*Faulting application name:\s*(?<name>[^,\r\n]+)'
-            Source  = 'EnglishFaultingApplicationName'
-        }
-    )
-
-    $pathRules = @(
-        [pscustomobject]@{
-            Pattern = '^\s*Ruta de aplicación con errores:\s*(?<path>[^\r\n]+)'
-            Source  = 'SpanishFaultingApplicationPath'
-        },
-        [pscustomobject]@{
-            Pattern = '^\s*Faulting application path:\s*(?<path>[^\r\n]+)'
-            Source  = 'EnglishFaultingApplicationPath'
-        },
-        [pscustomobject]@{
-            Pattern = '^\s*Ruta de módulo con errores:\s*(?<path>[^\r\n]+)'
-            Source  = 'SpanishFaultingModulePath'
-        },
-        [pscustomobject]@{
-            Pattern = '^\s*Faulting module path:\s*(?<path>[^\r\n]+)'
-            Source  = 'EnglishFaultingModulePath'
-        }
-    )
-
     foreach ($text in $texts) {
-        $lines = @($text -split '\r?\n')
+        $lines = @($text -split "`r?`n")
         foreach ($line in $lines) {
-            if (-not $processName) {
-                foreach ($rule in $nameRules) {
-                    $match = [regex]::Match($line, $rule.Pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-                    if ($match.Success) {
-                        $candidateName = Normalize-WTProcessName -Value $match.Groups['name'].Value -RequireExecutable
-                        if ($candidateName) {
-                            $processName = $candidateName
-                            if (-not $sourcePattern) {
-                                $sourcePattern = $rule.Source
-                            }
-                            break
-                        }
+            if (-not $processName -and $line -match '^\s*Nombre de aplicación con errores:') {
+                $value = $line.Substring($line.IndexOf(':') + 1).Trim()
+                if ($value -match ',') {
+                    $value = ($value -split ',', 2)[0]
+                }
+                $candidateName = Normalize-WTProcessName -Value $value -RequireExecutable
+                if ($candidateName) {
+                    $processName = $candidateName
+                    $sourcePattern = 'SpanishFaultingApplicationName'
+                }
+            }
+
+            if (-not $processPath -and $line -match '^\s*Ruta de aplicación con errores:') {
+                $value = $line.Substring($line.IndexOf(':') + 1).Trim()
+                $candidatePath = Normalize-WTProcessPath -Value $value
+                if ($candidatePath) {
+                    $processPath = $candidatePath
+                    if (-not $sourcePattern) {
+                        $sourcePattern = 'SpanishFaultingApplicationPath'
                     }
                 }
             }
 
-            if (-not $processPath) {
-                foreach ($rule in $pathRules) {
-                    $match = [regex]::Match($line, $rule.Pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-                    if ($match.Success) {
-                        $candidatePath = Normalize-WTProcessPath -Value $match.Groups['path'].Value
-                        if ($candidatePath) {
-                            $processPath = $candidatePath
-                            if (-not $sourcePattern) {
-                                $sourcePattern = $rule.Source
-                            }
-                            break
-                        }
+            if (-not $processPath -and $line -match '^\s*Ruta de módulo con errores:') {
+                $value = $line.Substring($line.IndexOf(':') + 1).Trim()
+                $candidatePath = Normalize-WTProcessPath -Value $value
+                if ($candidatePath) {
+                    $processPath = $candidatePath
+                    if (-not $sourcePattern) {
+                        $sourcePattern = 'SpanishFaultingModulePath'
+                    }
+                }
+            }
+
+            if (-not $processName -and $line -match '^\s*Faulting application name:') {
+                $value = $line.Substring($line.IndexOf(':') + 1).Trim()
+                if ($value -match ',') {
+                    $value = ($value -split ',', 2)[0]
+                }
+                $candidateName = Normalize-WTProcessName -Value $value -RequireExecutable
+                if ($candidateName) {
+                    $processName = $candidateName
+                    if (-not $sourcePattern) {
+                        $sourcePattern = 'EnglishFaultingApplicationName'
+                    }
+                }
+            }
+
+            if (-not $processPath -and $line -match '^\s*Faulting application path:') {
+                $value = $line.Substring($line.IndexOf(':') + 1).Trim()
+                $candidatePath = Normalize-WTProcessPath -Value $value
+                if ($candidatePath) {
+                    $processPath = $candidatePath
+                    if (-not $sourcePattern) {
+                        $sourcePattern = 'EnglishFaultingApplicationPath'
+                    }
+                }
+            }
+
+            if (-not $processPath -and $line -match '^\s*Faulting module path:') {
+                $value = $line.Substring($line.IndexOf(':') + 1).Trim()
+                $candidatePath = Normalize-WTProcessPath -Value $value
+                if ($candidatePath) {
+                    $processPath = $candidatePath
+                    if (-not $sourcePattern) {
+                        $sourcePattern = 'EnglishFaultingModulePath'
                     }
                 }
             }
@@ -2369,6 +2378,141 @@ function Get-WTEventProcessName {
         ProcessName   = $processName
         ProcessPath   = $processPath
         SourcePattern = $sourcePattern
+    }
+}
+
+function Invoke-WTEventParserSelfTest {
+    [CmdletBinding()]
+    param()
+
+    $tests = @(
+        [pscustomobject]@{
+            Name = 'Application Error 1000 Spanish'
+            Message = @'
+Nombre de aplicación con errores: mxdhcp.exe, versión: 1.1.0.3, marca de tiempo: 0x67b30e7f
+Nombre del módulo con errores: mxdhcp.exe, versión: 1.1.0.3, marca de tiempo: 0x67b30e7f
+Código de excepción: 0xc0000005
+Desplazamiento con errores: 0x0000000000003110
+Id. de proceso con errores: 0x162C
+Tiempo de inicio de aplicación con errores: 0x1DCD41AA9CEC325
+Ruta de aplicación con errores: C:\Program Files\NComputing\vSpace Server Software\mxdhcp.exe
+Ruta de módulo con errores: C:\Program Files\NComputing\vSpace Server Software\mxdhcp.exe
+Id. de informe: 7eef0426-7d19-4b99-b2dc-6887c9f23c11
+Nombre completo del paquete con errores:
+Id. de aplicación relacionado con el paquete con errores:
+'@
+            MessageShort = $null
+            ProviderName = 'Application Error'
+            Id = 1000
+            WerEventName = $null
+            ExpectedProcessName = 'mxdhcp.exe'
+            ExpectedProcessPath = 'C:\Program Files\NComputing\vSpace Server Software\mxdhcp.exe'
+            ExpectedSourcePattern = 'SpanishFaultingApplicationName'
+        },
+        [pscustomobject]@{
+            Name = 'WER APPCRASH Spanish'
+            Message = @'
+Nombre de evento: APPCRASH
+Firma del problema:
+P1: mxdhcp.exe
+P2: 1.1.0.3
+'@
+            MessageShort = $null
+            ProviderName = 'Windows Error Reporting'
+            Id = 1001
+            WerEventName = 'APPCRASH'
+            ExpectedProcessName = 'mxdhcp.exe'
+            ExpectedProcessPath = $null
+            ExpectedSourcePattern = 'WerP1CrashExecutable'
+        },
+        [pscustomobject]@{
+            Name = 'WER NonCritical GDIObjectLeak'
+            Message = @'
+Nombre de evento: GDIObjectLeak
+Firma del problema:
+P1: MeshAgent.exe
+P2: 0.0.0.0
+'@
+            MessageShort = $null
+            ProviderName = 'Windows Error Reporting'
+            Id = 1001
+            WerEventName = 'GDIObjectLeak'
+            ExpectedProcessName = $null
+            ExpectedProcessPath = $null
+            ExpectedSourcePattern = $null
+        },
+        [pscustomobject]@{
+            Name = 'WER NonCritical AppxDeploymentFailureBlue'
+            Message = @'
+Nombre de evento: AppxDeploymentFailureBlue
+Firma del problema:
+P1: 80073CFB
+P2: Windows.Desktop
+'@
+            MessageShort = $null
+            ProviderName = 'Windows Error Reporting'
+            Id = 1001
+            WerEventName = 'AppxDeploymentFailureBlue'
+            ExpectedProcessName = $null
+            ExpectedProcessPath = $null
+            ExpectedSourcePattern = $null
+        }
+    )
+
+    $results = @()
+    $failed = $false
+
+    foreach ($test in $tests) {
+        $actual = Get-WTEventProcessName -Message $test.Message -MessageShort $test.MessageShort -ProviderName $test.ProviderName -Id $test.Id -WerEventName $test.WerEventName
+        $pass = (
+            $actual.ProcessName -eq $test.ExpectedProcessName -and
+            $actual.ProcessPath -eq $test.ExpectedProcessPath -and
+            $actual.SourcePattern -eq $test.ExpectedSourcePattern
+        )
+
+        if ($pass) {
+            Write-Host ('PASS: {0}' -f $test.Name) -ForegroundColor Green
+        }
+        else {
+            $failed = $true
+            Write-Host ('FAIL: {0}' -f $test.Name) -ForegroundColor Red
+            Write-Host ('  Expected ProcessName={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedProcessName)) -ForegroundColor Red
+            Write-Host ('  Actual   ProcessName={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ProcessName)) -ForegroundColor Red
+            Write-Host ('  Expected ProcessPath={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedProcessPath)) -ForegroundColor Red
+            Write-Host ('  Actual   ProcessPath={0}' -f (ConvertTo-WTDisplayValue -Value $actual.ProcessPath)) -ForegroundColor Red
+            Write-Host ('  Expected SourcePattern={0}' -f (ConvertTo-WTDisplayValue -Value $test.ExpectedSourcePattern)) -ForegroundColor Red
+            Write-Host ('  Actual   SourcePattern={0}' -f (ConvertTo-WTDisplayValue -Value $actual.SourcePattern)) -ForegroundColor Red
+        }
+
+        $results += [pscustomobject]@{
+            Name = $test.Name
+            Passed = $pass
+            ExpectedProcessName = $test.ExpectedProcessName
+            ActualProcessName = $actual.ProcessName
+            ExpectedProcessPath = $test.ExpectedProcessPath
+            ActualProcessPath = $actual.ProcessPath
+            ExpectedSourcePattern = $test.ExpectedSourcePattern
+            ActualSourcePattern = $actual.SourcePattern
+        }
+    }
+
+    if ($failed) {
+        Write-Host 'FAIL' -ForegroundColor Red
+        return [pscustomobject]@{
+            Passed = $false
+            Results = $results
+        }
+    }
+
+    Write-Host 'PASS' -ForegroundColor Green
+    Write-Host 'Self-test summary:' -ForegroundColor Green
+    foreach ($result in $results) {
+        Write-Host ('- {0}: PASS' -f $result.Name) -ForegroundColor Green
+    }
+
+    return [pscustomobject]@{
+        Passed = $true
+        Results = $results
     }
 }
 
@@ -3289,7 +3433,18 @@ function Invoke-WinTriage {
     }
 }
 
-$script:WTExitCode = Invoke-WinTriage
-if ($UseExitCode.IsPresent) {
-    exit $script:WTExitCode
+if ($SelfTestEventParser.IsPresent) {
+    $selfTestResult = Invoke-WTEventParserSelfTest
+    if ($UseExitCode.IsPresent) {
+        if ($selfTestResult.Passed) {
+            exit 0
+        }
+        exit 1
+    }
+}
+else {
+    $script:WTExitCode = Invoke-WinTriage
+    if ($UseExitCode.IsPresent) {
+        exit $script:WTExitCode
+    }
 }

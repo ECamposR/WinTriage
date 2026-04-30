@@ -27,3 +27,5 @@
 - Bumped script version to `0.3.6` after restoring the Spanish `Application Error 1000` parser path.
 - Refined the Spanish `Application Error 1000` parser to use line-oriented matching and improved the internal warning path for future regressions.
 - Bumped script version to `0.3.7` after correcting the last pending kernel-uptime and boot-state semantics work.
+- Added `-SelfTestEventParser` to validate `Get-WTEventProcessName` against Spanish Application Error and WER crash samples before running the full triage.
+- Bumped script version to `0.3.8` after hardening the Spanish `Application Error 1000` parser path and adding parser self-tests.
